@@ -117,6 +117,14 @@ previews. Clicks open the announced message; reading a chat withdraws its
 tracked notifications. OS permissions and notification presentation still apply.
 
 
+## Remote transcription
+
+The `remote-transcription` feature branch adds manual transcription of voice
+messages through an OpenAI-compatible provider (OpenAI, Grok, Gemini or a
+local server). Pick the provider in **Settings → Transcription**; the API key
+stays in the OS keyring. Right-click a voice message and choose
+**Transcribe**: the audio is sent only to the endpoint you configure.
+
 ## More native apps
 
 **Want Spotify just as fast and native?** [Spotifast](https://spotifast.rocks)

@@ -54,6 +54,63 @@ impl ThemeChoice {
     }
 }
 
+/// Remote transcription provider. Transcription is provider-neutral: every
+/// variant speaks an OpenAI-compatible endpoint, so only the default base URL
+/// and model differ. The user's API key never lives in settings; it is stored
+/// in the OS keyring.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TranscriptionProvider {
+    #[default]
+    #[serde(rename = "none")]
+    None,
+    #[serde(rename = "openai")]
+    OpenAiCompatible,
+    #[serde(rename = "grok")]
+    Grok,
+    #[serde(rename = "gemini")]
+    Gemini,
+}
+
+impl TranscriptionProvider {
+    pub const ALL: [TranscriptionProvider; 4] =
+        [Self::None, Self::OpenAiCompatible, Self::Grok, Self::Gemini];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "Off",
+            Self::OpenAiCompatible => "OpenAI-compatible",
+            Self::Grok => "Grok",
+            Self::Gemini => "Gemini",
+        }
+    }
+
+    pub fn default_base_url(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::OpenAiCompatible => Some("https://api.openai.com/v1"),
+            Self::Grok => Some("https://api.x.ai/v1"),
+            Self::Gemini => Some("https://generativelanguage.googleapis.com/v1beta/openai"),
+        }
+    }
+
+    pub fn default_model(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::OpenAiCompatible | Self::Grok | Self::Gemini => "whisper-1",
+        }
+    }
+
+    /// Stable identifier for the transcription cache.
+    pub fn kind(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::OpenAiCompatible => "openai",
+            Self::Grok => "grok",
+            Self::Gemini => "gemini",
+        }
+    }
+}
+
 /// The typeface the interface is drawn with.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -476,6 +533,12 @@ pub struct Settings {
     pub reaction_emoji: Vec<(String, u32)>,
     /// User GIPHY API key. Empty uses the optional built-in key.
     pub giphy_key: String,
+    /// Remote transcription provider. `None` disables transcription.
+    pub transcription_provider: TranscriptionProvider,
+    /// Transcription base URL. Empty uses the provider's default.
+    pub transcription_base_url: String,
+    /// Transcription model name. Empty uses the provider's default.
+    pub transcription_model: String,
     /// Keep the app linked in the tray when the window closes. On macOS,
     /// where a closed ZapFast always stays in the Dock, whether it has a
     /// menu-bar item.
@@ -579,6 +642,9 @@ impl Default for Settings {
             recent_emoji: Vec::new(),
             reaction_emoji: Vec::new(),
             giphy_key: String::new(),
+            transcription_provider: TranscriptionProvider::None,
+            transcription_base_url: String::new(),
+            transcription_model: String::new(),
             keep_running_in_background: true,
             notifications: true,
             notification_content: true,

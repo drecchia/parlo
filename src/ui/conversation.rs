@@ -2640,6 +2640,10 @@ struct View<'a> {
     chat: &'a Chat,
     me: Option<&'a str>,
     auto_download: bool,
+    /// Whether a remote transcription provider is configured.
+    transcription_enabled: bool,
+    /// Transcripts of this chat's voice messages, by message id.
+    transcripts: &'a std::collections::HashMap<String, String>,
     connected: bool,
     account_receipts_off: bool,
     poll_voting: &'a HashSet<(ChatId, String)>,
@@ -3085,12 +3089,16 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat, under: f32) {
     // reader is attached, like the rows' labels, once the list's node exists.
     let list_label =
         || crate::a11y::messages_list_label(app.locale, &app.chat_title(chat), chat.is_group());
+    let transcripts = conversation.transcripts.clone();
     let view = View {
         palette,
         locale: app.locale,
         chat,
         me: app.me.as_deref(),
         auto_download: app.account().settings.auto_download,
+        transcription_enabled: app.settings.transcription_provider
+            != crate::settings::TranscriptionProvider::None,
+        transcripts: &transcripts,
         connected: app.link.is_connected(),
         account_receipts_off: app.account_receipts_off,
         poll_voting: &app.poll_voting,
@@ -4989,6 +4997,16 @@ fn bubble(
                     actions,
                 ));
             }
+            if let Some(transcript) = view.transcripts.get(&message.id) {
+                ui.add_space(-5.0);
+                ui.horizontal(|ui| {
+                    if with_avatar {
+                        ui.add_space(SENDER_AVATAR + 8.0);
+                    }
+                    transcript_text(ui, view, transcript, max_width);
+                });
+                ui.add_space(2.0);
+            }
             // An album row carries every member's reactions, each set
             // reacting to its own item.
             let members = album.unwrap_or(std::slice::from_ref(message));
@@ -5007,6 +5025,31 @@ fn bubble(
         },
     );
     response
+}
+
+/// The empty transcript map for views drawn outside a chat's message list.
+fn no_transcripts() -> &'static std::collections::HashMap<String, String> {
+    static EMPTY: std::sync::OnceLock<std::collections::HashMap<String, String>> =
+        std::sync::OnceLock::new();
+    EMPTY.get_or_init(Default::default)
+}
+
+/// Renders a selectable, copyable transcription under a voice message. The
+/// text is plain content: it is never interpreted as a command.
+fn transcript_text(ui: &mut egui::Ui, view: &View<'_>, text: &str, width: f32) {
+    let palette = view.palette;
+    let style = markup::Style {
+        size: BODY_SIZE - 1.0,
+        color: palette.secondary,
+        secondary: palette.secondary,
+        link: palette.link,
+        mention: palette.accent,
+    };
+    let laid = markup::layout(ui, text, &[], &style, width);
+    let (rect, response) = ui.allocate_exact_size(laid.galley.size(), Sense::CLICK | Sense::DRAG);
+    if ui.is_rect_visible(rect) {
+        markup::paint_selectable(ui, &laid, &response, rect.min, palette.secondary, true);
+    }
 }
 
 /// Clamps message-selection drags to the view while the pointer is outside it.
@@ -7097,6 +7140,9 @@ pub(crate) fn list_menu(
         chat,
         me: app.me.as_deref(),
         auto_download: app.settings.auto_download,
+        transcription_enabled: app.settings.transcription_provider
+            != crate::settings::TranscriptionProvider::None,
+        transcripts: no_transcripts(),
         connected: app.link.is_connected(),
         poll_voting: &app.poll_voting,
         interactive_pending: &app.interactive_sending,
@@ -7640,6 +7686,15 @@ fn context_menu(
     {
         speed_menu_row(ui, view, message, actions);
     }
+    if view.transcription_enabled
+        && matches!(message.content, Content::Audio { .. })
+        && widgets::menu_item(ui, &palette, Some(Icon::Captions), "Transcribe")
+    {
+        actions.push(Action::Transcribe {
+            chat: chat.clone(),
+            message: message.id.clone(),
+        });
+    }
     widgets::menu_separator(ui, &palette);
     // The menu holds actions only. Sent, delivery, and read times, per member
     // in a group, live in "Message info".
@@ -8152,10 +8207,17 @@ fn content(
         _ => false,
     };
     if !has_body && let Some(copy_rows) = view.copy_rows {
+        // A transcribed voice message copies its transcript as the row body,
+        // so a selection crossing it still gets the per-message headers.
+        let body = view
+            .transcripts
+            .get(&message.id)
+            .cloned()
+            .unwrap_or_default();
         copy_rows
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .push(transcript_row(view, message, String::new(), Vec::new()));
+            .push(transcript_row(view, message, body, Vec::new()));
     }
     match &message.content {
         Content::Interactive { text, card } => {
@@ -12832,6 +12894,9 @@ mod tests {
             chat: &chat,
             me: None,
             auto_download: app.settings.auto_download,
+            transcription_enabled: app.settings.transcription_provider
+                != crate::settings::TranscriptionProvider::None,
+            transcripts: no_transcripts(),
             connected: false,
             poll_voting: &app.poll_voting,
             interactive_pending: &app.interactive_sending,
