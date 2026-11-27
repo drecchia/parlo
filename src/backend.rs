@@ -1876,6 +1876,12 @@ impl Backend {
         self.offline = offline;
     }
 
+    /// A second way to send commands, for the MCP server that shares this
+    /// backend with the window. It does not honor `set_offline`.
+    pub fn command_sender(&self) -> mpsc::UnboundedSender<Command> {
+        self.commands.clone()
+    }
+
     pub fn is_offline(&self) -> bool {
         self.offline
     }

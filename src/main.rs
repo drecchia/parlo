@@ -17,8 +17,16 @@ struct Cli {
     verbose: bool,
     /// Start in the tray without opening a window, when the tray is available
     /// and ZapFast keeps running in the background. For login autostart.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "mcp")]
     start_hidden: bool,
+    /// Serve the linked account to an MCP client over stdin and stdout
+    /// instead of opening the window. Only one ZapFast may run at a time.
+    #[arg(long)]
+    mcp: bool,
+    /// With `--mcp`: the account id to serve; repeat for several. Defaults to
+    /// the account the window used last.
+    #[arg(long, requires = "mcp", value_name = "ID")]
+    mcp_account: Vec<String>,
 
     /// Start with offline sample chats.
     #[cfg(feature = "demo")]
@@ -221,6 +229,9 @@ fn run() -> eframe::Result<()> {
             std::process::exit(code);
         }
         return Ok(());
+    }
+    if cli.mcp {
+        return run_mcp(&cli, discovered);
     }
     // A number, a `wa.me` link, or the `whatsapp://` URI the desktop entry
     // passes. Read before the single-instance guard, because it changes the
@@ -510,6 +521,53 @@ fn run() -> eframe::Result<()> {
         })?;
     drop(instance);
     Ok(())
+}
+
+/// `--mcp`: the same session and archive as the window, served over stdio.
+///
+/// Standard output is the protocol's, so logs go to standard error only. The
+/// instance guard keeps the window, or a second server, from opening the
+/// session this one holds.
+fn run_mcp(cli: &Cli, dirs: paths::AppDirs) -> eframe::Result<()> {
+    let failed = |error: anyhow::Error| eframe::Error::AppCreation(error.into());
+    let waker = backend::Waker::default();
+    // "ping" asks a running copy for nothing: it must not raise its window.
+    let _instance = match single_instance::acquire(&dirs.runtime, &waker, "ping") {
+        single_instance::Outcome::Only(guard) => guard,
+        // The window is open and holds the session: relay to its MCP socket
+        // rather than open the session a second time.
+        _ => {
+            let socket = zapfast::mcp::host::socket_path(&dirs.runtime);
+            let options = zapfast::mcp::Options {
+                accounts: cli.mcp_account.clone(),
+            };
+            return zapfast::mcp::proxy::run(&socket, &options).map_err(failed);
+        }
+    };
+    dirs.adopt_previous_names()
+        .map_err(|error| eframe::Error::AppCreation(error.into()))?;
+    dirs.ensure()
+        .map_err(|error| eframe::Error::AppCreation(error.into()))?;
+    fastframe_log::Logging::new("zapfast", env!("CARGO_PKG_VERSION"))
+        .filter(default_log_filter(cli.verbose))
+        .panic_log(dirs.panic_log())
+        .redact(redact_protocol)
+        .init()
+        .map_err(|error| eframe::Error::AppCreation(error.into()))?;
+    if let Err(error) = dirs.adopt_single_account() {
+        log::error!("could not move the linked account into its folder: {error}");
+        return Err(eframe::Error::AppCreation(error.into()));
+    }
+    let settings = settings::Settings::load(&dirs.settings_file());
+    zapfast::mcp::run(
+        dirs,
+        settings,
+        zapfast::mcp::Options {
+            accounts: cli.mcp_account.clone(),
+        },
+        zapfast::mcp::config::Config::from_env(),
+    )
+    .map_err(failed)
 }
 
 /// Whether eframe stopped because the graphics driver gave it no usable

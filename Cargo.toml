@@ -81,7 +81,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 # signaling, the sans-IO media engine with MLOW and libopus codecs, and the
 # native UDP relay transport.
 whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "719f29498124acaede51c555c8f1c7a1c423fb3d", default-features = false, features = ["sqlite-storage", "tokio-transport", "tokio-runtime", "ureq-client", "tokio-native", "voip"] }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "fs", "net", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "fs", "net", "io-util", "signal"] }
 # Queue between the call's audio streams and the engine.
 async-channel = "2.5"
 # Opens the WhatsApp WebSocket through a proxy. Both crates are already
@@ -166,6 +166,10 @@ webp-animation = "0.10"
 # Encodes stickers made from pictures as still lossy WebP. Already included
 # through webp-animation, whose animation encoder always writes an animation.
 libwebp-sys2 = { version = "0.2", features = ["1_2"] }
+# Model Context Protocol server for `zapfast --mcp`: the official Rust SDK over
+# stdio. No HTTP, TLS, or OAuth features are enabled.
+rmcp = { version = "3.5", default-features = false, features = ["server", "macros", "transport-io"] }
+
 # Shared foundation of Carmine's egui apps (github.com/crmne/fastframe). Every
 # crate comes from the same revision.
 # Bundled gettext catalogs: lookups and system language detection.

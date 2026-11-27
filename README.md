@@ -116,6 +116,13 @@ its account/chat routing, privacy settings, notification limits and sound
 previews. Clicks open the announced message; reading a chat withdraws its
 tracked notifications. OS permissions and notification presentation still apply.
 
+## MCP Integration
+
+The `mcp` feature branch adds `zapfast --mcp`, a Model Context Protocol server over stdio that
+lets MCP clients (Codex, Claude, Orca) read and, if you allow it, send WhatsApp
+messages through the linked account. It is read-only by default and reuses the
+existing backend, and can share the open window through a private socket. See [docs/MCP.md](docs/MCP.md).
+
 
 ## More native apps
 

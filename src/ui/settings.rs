@@ -725,6 +725,22 @@ fn sections(app: &App) -> Vec<Section> {
         ),
         |settings| &mut settings.download_updates_automatically,
     );
+    system.toggle(
+        translated(locale, "Share with AI agents (MCP)"),
+        translated(
+            locale,
+            "Lets MCP clients such as Codex or Claude read your chats through `zapfast --mcp` while ZapFast is open. Off while the app lock is set. Applies after a restart.",
+        ),
+        |settings| &mut settings.mcp_server,
+    );
+    system.toggle(
+        translated(locale, "Let AI agents send messages"),
+        translated(
+            locale,
+            "Also allows sending messages and files and marking chats read. They can send to anyone you can message. Applies after a restart.",
+        ),
+        |settings| &mut settings.mcp_allow_write,
+    );
     let environment = app
         .settings
         .proxy
