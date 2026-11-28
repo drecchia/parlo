@@ -251,6 +251,14 @@ pub enum Command {
         from_chat: ChatId,
         messages: Vec<String>,
     },
+    /// Sends selected messages to an external tool, answered with
+    /// [`Event::ToolAnswer`]. Never touches WhatsApp.
+    SendToTool {
+        tool: crate::external_tools::Tool,
+        chat: ChatId,
+        text: String,
+        files: Vec<crate::external_tools::ToolFile>,
+    },
     /// Updates our typing state in a chat.
     Composing {
         chat: ChatId,
@@ -1233,6 +1241,13 @@ pub enum Event {
         from_chat: ChatId,
         messages: Vec<String>,
         limit: usize,
+    },
+    /// An external tool finished: its answer, nothing, or a sentence for a
+    /// toast.
+    ToolAnswer {
+        tool: String,
+        chat: ChatId,
+        result: Result<Option<String>, String>,
     },
     PollVoted {
         chat: ChatId,

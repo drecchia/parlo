@@ -237,6 +237,23 @@ fn media(mime: &str, size: u64, width: Option<u32>, height: Option<u32>) -> Medi
     }
 }
 
+/// External tools for the Forward dialog and Settings: one of each kind.
+fn sample_tools() -> Vec<crate::external_tools::Tool> {
+    vec![
+        crate::external_tools::Tool {
+            name: "Summarize".into(),
+            target: "https://tools.example/summarize".into(),
+            ..Default::default()
+        },
+        crate::external_tools::Tool {
+            name: "Research bot".into(),
+            kind: crate::external_tools::ToolKind::Orca,
+            target: "research".into(),
+            answer: false,
+        },
+    ]
+}
+
 /// Generates a speech-like demo waveform.
 fn demo_waveform() -> Vec<u8> {
     (0..crate::voice::BARS)
@@ -3072,12 +3089,16 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 app.scroll_to_bottom = true;
                 app.timer_saving.insert(chat.to_owned());
             }
-            "forward" | "forward-selected" | "forward-review" | "forward-full" | "forward-once" => {
+            "forward" | "forward-selected" | "forward-review" | "forward-full" | "forward-once"
+            | "forward-tools" => {
                 app.dialog = app.open_chat.clone().map(|chat| Dialog::Forward {
                     chat,
                     messages: vec!["ada-format".to_owned()],
                 });
                 app.forward_limit = crate::model::FORWARD_LIMIT;
+                if part == "forward-tools" {
+                    app.settings.external_tools = sample_tools();
+                }
                 match part {
                     "forward-selected" | "forward-review" => {
                         app.forward_recipients =
@@ -3107,6 +3128,11 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 }
             }
             "unlink" => app.dialog = Some(Dialog::ConfirmUnlink),
+            "settings-tools" => {
+                app.page = Page::Settings;
+                app.settings_search = "External tools".to_owned();
+                app.settings.external_tools = sample_tools();
+            }
             "clear-media" => {
                 app.dialog = Some(Dialog::ConfirmClearMediaCache(app.account().id.clone()));
             }
@@ -3317,6 +3343,9 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
             "pinned" => pin_sample(app),
             "light" => {
                 app.settings.theme = ThemeChoice::Light;
+            }
+            "dark" => {
+                app.settings.theme = ThemeChoice::Dark;
             }
             "messages" => {
                 app.settings.theme = ThemeChoice::Messages;
@@ -9745,6 +9774,8 @@ mod tests {
             "forward-review",
             "forward-full",
             "forward-once",
+            "forward-tools",
+            "settings-tools",
             "unlink",
             "leave-group",
             "left-group",
@@ -10499,6 +10530,7 @@ mod tests {
                 "forward",
                 "forward-selected",
                 "forward-once",
+                "forward-tools",
                 "forward-full",
                 "forward-review",
             ] {
