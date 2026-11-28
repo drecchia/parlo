@@ -503,6 +503,13 @@ pub struct Settings {
     /// Proxy for WhatsApp, media, and updates, such as
     /// `socks5h://127.0.0.1:9050`. Empty follows `ALL_PROXY` / `HTTPS_PROXY`.
     pub proxy: String,
+    /// Serve the linked accounts to MCP clients through a private socket
+    /// while the window is open (`zapfast --mcp` connects to it). Takes
+    /// effect at the next start, and never with the app lock set.
+    pub mcp_server: bool,
+    /// Let those clients send messages and files and mark chats read. Off,
+    /// they can only read, whatever the client asks for.
+    pub mcp_allow_write: bool,
     /// Ask GitHub once a day whether a newer release exists.
     pub check_for_updates: bool,
     /// Download verified updates in the background; restarting remains explicit.
@@ -588,6 +595,8 @@ impl Default for Settings {
             download_folder: None,
             keep_chats_archived: true,
             proxy: String::new(),
+            mcp_server: false,
+            mcp_allow_write: false,
             check_for_updates: true,
             download_updates_automatically: false,
             save_contacts_to_phone: true,

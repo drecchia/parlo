@@ -985,6 +985,9 @@ pub struct App {
     announced_offline: bool,
     /// "Connecting" is spoken once per offline episode, not on every retry.
     announced_connecting: bool,
+    /// The MCP server that shares this window's accounts, when the settings
+    /// turn it on ([`crate::mcp::host`]).
+    mcp: Option<crate::mcp::host::Host>,
 }
 
 /// A message that flashes after a jump to it, as WhatsApp does.
@@ -1432,6 +1435,7 @@ impl App {
             .min(accounts.len() - 1);
         let mut app = Self::with_accounts(dirs, settings, roster, accounts, active, waker.clone());
         app.pauses_media = true;
+        app.start_mcp();
         app.call_tones = crate::call_tones::Tones::new(true);
         app.badge = Some(crate::notify::Badge::new(fastframe_desktop::desktop_entry(
             "zapfast",
@@ -1813,6 +1817,7 @@ impl App {
             announcer: Default::default(),
             announced_offline: false,
             announced_connecting: false,
+            mcp: None,
         };
         // A hand-edited speed snaps to a supported one, so a speed control
         // always shows the speed that plays.
@@ -2075,6 +2080,18 @@ impl App {
         self.pending_follow = None;
     }
 
+    /// Starts sharing the accounts with MCP clients, if the settings ask.
+    fn start_mcp(&mut self) {
+        let private = vec![self.dirs.state.clone(), self.dirs.config.clone()];
+        let active = self.account().id.to_string();
+        self.mcp = crate::mcp::host::launch(&self.dirs.runtime, &self.settings, private, &active);
+        if let Some(host) = &self.mcp {
+            for account in &self.accounts {
+                host.add_account(account.id.as_str(), account.backend.command_sender());
+            }
+        }
+    }
+
     fn add_account(&mut self) {
         let id = self.roster.allocate();
         let account = if self
@@ -2107,6 +2124,9 @@ impl App {
         self.account_before_adding = Some(self.account().id.clone());
         self.park_composer();
         self.clear_account_ui();
+        if let Some(host) = &self.mcp {
+            host.add_account(account.id.as_str(), account.backend.command_sender());
+        }
         self.accounts.push(account);
         self.active = self.accounts.len() - 1;
         self.adding_account = true;
@@ -2142,6 +2162,9 @@ impl App {
         if removing_active {
             self.park_composer();
             self.clear_account_ui();
+        }
+        if let Some(host) = &self.mcp {
+            host.remove_account(self.accounts[index].id.as_str());
         }
         self.accounts[index].backend.shutdown();
         // The backend ends its call on the way out; the surface goes with it.
@@ -3679,6 +3702,9 @@ impl App {
         let mut removed = Vec::new();
         let mut deferred = Vec::new();
         let real_active = self.active;
+        if let Some(host) = &self.mcp {
+            host.set_active(self.accounts[real_active].id.as_str());
+        }
         for index in 0..self.accounts.len() {
             let events = self.accounts[index].backend.poll();
             if events.is_empty() {
@@ -3692,6 +3718,9 @@ impl App {
                 if matches!(event, Event::AccountRemoved) {
                     removed.push(index);
                     continue;
+                }
+                if let Some(host) = &self.mcp {
+                    host.feed(origin.as_str(), &event);
                 }
                 self.events_hidden = !live;
                 self.apply_backend_event(event, live);
