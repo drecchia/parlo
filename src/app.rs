@@ -765,6 +765,8 @@ pub struct App {
     pub forward_reviewing: bool,
     /// How many recipients the forwarding dialog's messages may have.
     pub forward_limit: usize,
+    /// Sends to external tools waiting for their media to download.
+    tool_jobs: Vec<external_tools::ToolJob>,
     /// The group name being typed in the group info dialog.
     pub group_name_edit: Option<String>,
     /// The group description being typed in the info panel.
@@ -1723,6 +1725,7 @@ impl App {
             forward_recipients: Vec::new(),
             forward_reviewing: false,
             forward_limit: crate::model::FORWARD_LIMIT,
+            tool_jobs: Vec::new(),
             group_name_edit: None,
             group_description_edit: None,
             new_contact_to_phone: true,
@@ -4152,6 +4155,7 @@ impl App {
                     self.interactive_sending.remove(&(chat, message));
                 }
             }
+            Event::ToolAnswer { tool, chat, result } => self.tool_answered(tool, chat, result),
             Event::ForwardLimit {
                 from_chat,
                 messages,
@@ -4506,7 +4510,10 @@ impl App {
                 chat,
                 message,
                 result,
-            } => self.handle_media(&chat, &message, card, result),
+            } => {
+                self.handle_media(&chat, &message, card, result);
+                self.tool_job_step();
+            }
             Event::DownloadProgress {
                 chat,
                 message,
@@ -8376,6 +8383,7 @@ impl App {
                 self.forward_reviewing = false;
                 self.selection = None;
             }
+            Action::SendToTool(index) => self.send_to_tool(index),
             Action::StartSelection => {
                 // Choosing it again keeps what is already ticked.
                 if let Some(chat) = self.open_chat.clone()
@@ -12488,6 +12496,7 @@ fn notification_eligible(chat: &Chat, now: i64, message_at: i64) -> bool {
 }
 
 mod calls;
+mod external_tools;
 pub use calls::CallPerson;
 
 /// The character ranges of `text` to wrap in `format`'s markers for a
@@ -14107,6 +14116,211 @@ mod tests {
         );
         app.apply(Action::ToggleForwardRecipient("left".into()), &ctx);
         assert!(app.forward_recipients.is_empty());
+    }
+
+    fn tool_app() -> (
+        App,
+        tokio::sync::mpsc::UnboundedReceiver<Command>,
+        egui::Context,
+    ) {
+        let mut app = app();
+        let (backend, commands) = Backend::recording();
+        app.backend = backend;
+        app.settings.external_tools = vec![crate::external_tools::Tool {
+            name: "Echo".into(),
+            target: "https://example.com/hook".into(),
+            ..Default::default()
+        }];
+        let chat = "1@s.whatsapp.net";
+        app.chats = vec![Chat::new(chat.into(), "Ada".into())];
+        app.open_chat = Some(chat.into());
+        (app, commands, egui::Context::default())
+    }
+
+    fn tool_sends(
+        commands: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+    ) -> Vec<(String, Vec<crate::external_tools::ToolFile>)> {
+        std::iter::from_fn(|| commands.try_recv().ok())
+            .filter_map(|command| match command {
+                Command::SendToTool { text, files, .. } => Some((text, files)),
+                Command::Forward { .. } => panic!("a tool send never forwards"),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_tool_gets_the_ctrl_c_text_and_nothing_is_forwarded() {
+        let (mut app, mut commands, ctx) = tool_app();
+        let chat = "1@s.whatsapp.net";
+        app.conversations.entry(chat.into()).or_default().merge(
+            vec![message(chat, "first", 1), message(chat, "second", 2)],
+            false,
+        );
+        app.apply(Action::SelectMessage("first".into()), &ctx);
+        app.apply(Action::ToggleSelected("second".into()), &ctx);
+        let ids = vec!["first".to_owned(), "second".to_owned()];
+        let expected = crate::ui::conversation::transcript_of(&app, chat, &ids).unwrap();
+        app.apply(
+            Action::ShowDialog(Dialog::Forward {
+                chat: chat.into(),
+                messages: ids,
+            }),
+            &ctx,
+        );
+        app.apply(Action::SendToTool(0), &ctx);
+        assert_eq!(tool_sends(&mut commands), [(expected, Vec::new())]);
+        assert!(app.dialog.is_none());
+        assert!(app.selection.is_none());
+    }
+
+    #[test]
+    fn media_is_downloaded_before_a_tool_send() {
+        let (mut app, mut commands, ctx) = tool_app();
+        let chat = "1@s.whatsapp.net";
+        let picture = Message {
+            content: Content::Image {
+                motion: None,
+                caption: Some("look".into()),
+                media: Media {
+                    mime: "image/jpeg".into(),
+                    size: 100,
+                    width: None,
+                    height: None,
+                    album: None,
+                    path: None,
+                    state: MediaState::Idle,
+                },
+            },
+            ..message(chat, "picture", 1)
+        };
+        app.conversations
+            .entry(chat.into())
+            .or_default()
+            .merge(vec![picture], false);
+        app.apply(
+            Action::ShowDialog(Dialog::Forward {
+                chat: chat.into(),
+                messages: vec!["picture".into()],
+            }),
+            &ctx,
+        );
+        app.apply(Action::SendToTool(0), &ctx);
+        app.apply_actions(&ctx);
+        let mut downloads = 0;
+        for command in std::iter::from_fn(|| commands.try_recv().ok()) {
+            match command {
+                Command::Download {
+                    manual: true,
+                    message,
+                    ..
+                } if message == "picture" => {
+                    downloads += 1;
+                }
+                Command::SendToTool { .. } => panic!("sent before the media downloaded"),
+                _ => {}
+            }
+        }
+        assert_eq!(downloads, 1);
+        let file = tempfile::Builder::new().suffix(".jpg").tempfile().unwrap();
+        app.apply_backend_event(
+            Event::Media {
+                card: None,
+                chat: chat.into(),
+                message: "picture".into(),
+                result: Ok(file.path().to_owned()),
+            },
+            true,
+        );
+        let sends = tool_sends(&mut commands);
+        assert_eq!(sends.len(), 1);
+        assert_eq!(sends[0].1.len(), 1);
+        assert_eq!(sends[0].1[0].name, "1.jpg");
+        assert_eq!(sends[0].1[0].path, file.path());
+    }
+
+    #[test]
+    fn a_lock_during_the_download_stops_the_tool_send() {
+        let (mut app, mut commands, ctx) = tool_app();
+        let chat = "1@s.whatsapp.net";
+        let voice = Message {
+            content: Content::Audio {
+                media: Media {
+                    mime: "audio/ogg".into(),
+                    size: 100,
+                    width: None,
+                    height: None,
+                    album: None,
+                    path: None,
+                    state: MediaState::Idle,
+                },
+                seconds: Some(3),
+                voice_note: true,
+                waveform: Vec::new(),
+            },
+            ..message(chat, "voice", 1)
+        };
+        app.conversations
+            .entry(chat.into())
+            .or_default()
+            .merge(vec![voice], false);
+        app.apply(
+            Action::ShowDialog(Dialog::Forward {
+                chat: chat.into(),
+                messages: vec!["voice".into()],
+            }),
+            &ctx,
+        );
+        app.apply(Action::SendToTool(0), &ctx);
+        assert!(tool_sends(&mut commands).is_empty());
+        app.app_lock = crate::app_lock::AppLock::new(true);
+        let file = tempfile::Builder::new().suffix(".ogg").tempfile().unwrap();
+        app.apply_backend_event(
+            Event::Media {
+                card: None,
+                chat: chat.into(),
+                message: "voice".into(),
+                result: Ok(file.path().to_owned()),
+            },
+            true,
+        );
+        assert!(tool_sends(&mut commands).is_empty());
+        assert!(app.tool_jobs.is_empty());
+    }
+
+    #[test]
+    fn a_tool_answer_is_a_draft_and_is_never_sent() {
+        let (mut app, mut commands, _ctx) = tool_app();
+        app.apply_backend_event(
+            Event::ToolAnswer {
+                tool: "Echo".into(),
+                chat: "1@s.whatsapp.net".into(),
+                result: Ok(Some("pong".into())),
+            },
+            true,
+        );
+        assert_eq!(app.composer, "pong");
+        assert!(
+            std::iter::from_fn(|| commands.try_recv().ok())
+                .all(|command| matches!(command, Command::SaveDraft { .. })),
+            "only the draft is stored"
+        );
+    }
+
+    #[test]
+    fn a_tool_answer_never_replaces_typed_text() {
+        let (mut app, _commands, _ctx) = tool_app();
+        app.composer = "typing".into();
+        app.apply_backend_event(
+            Event::ToolAnswer {
+                tool: "Echo".into(),
+                chat: "1@s.whatsapp.net".into(),
+                result: Ok(Some("pong".into())),
+            },
+            true,
+        );
+        assert_eq!(app.composer, "typing");
+        assert!(app.actions.contains(&Action::CopyText("pong".into())));
     }
 
     /// Unrelated dialogs do not cancel a shared-contact lookup.

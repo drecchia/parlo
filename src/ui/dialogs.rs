@@ -701,6 +701,7 @@ fn forward(app: &mut App, ui: &mut egui::Ui, messages: &[String]) {
         .cloned()
         .collect();
     chats.sort_by_key(|chat| std::cmp::Reverse(chat.last_activity));
+    super::external_tools::forward_rows(app, ui, &needle, footer_rect.top());
 
     let row_height = 52.0;
     let max_height = (footer_rect.top() - ui.cursor().top() - 8.0).max(1.0);

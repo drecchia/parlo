@@ -7431,6 +7431,24 @@ impl Worker {
                     limit,
                 });
             }
+            Command::SendToTool {
+                tool,
+                chat,
+                text,
+                files,
+            } => {
+                let events = self.events.clone();
+                let waker = self.waker.clone();
+                tokio::task::spawn_blocking(move || {
+                    let result = crate::external_tools::send(&tool, &text, &files);
+                    let _ = events.send(Event::ToolAnswer {
+                        tool: tool.name.trim().to_owned(),
+                        chat,
+                        result,
+                    });
+                    waker.wake();
+                });
+            }
             // Stores the open chat's unsent text, or clears it when empty.
             Command::SaveDraft { chat, text } => {
                 let at = std::time::SystemTime::now()
