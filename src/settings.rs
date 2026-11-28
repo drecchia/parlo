@@ -548,6 +548,9 @@ pub struct Settings {
     pub window_y: Option<f32>,
     /// Whether the window was maximized when it last closed.
     pub window_maximized: bool,
+    /// Tools the Forward dialog can send selected messages to.
+    #[serde(deserialize_with = "crate::external_tools::tolerant")]
+    pub external_tools: Vec<crate::external_tools::Tool>,
 }
 
 impl Default for Settings {
@@ -605,6 +608,7 @@ impl Default for Settings {
             window_x: None,
             window_y: None,
             window_maximized: false,
+            external_tools: Vec::new(),
         }
     }
 }
@@ -1167,6 +1171,32 @@ mod tests {
         settings.save(&path).unwrap();
         let stored = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         (settings, stored)
+    }
+
+    /// A tool this build cannot read is dropped alone: the other settings,
+    /// and the other tools, survive it.
+    #[test]
+    fn external_tools_round_trip_and_a_bad_one_spares_the_rest() {
+        let (settings, _) = load_from(r#"{"enter_sends":false}"#);
+        assert!(settings.external_tools.is_empty());
+        let (settings, stored) = load_from(
+            r#"{"enter_sends":false,"external_tools":[
+                {"name":"Pigeon","kind":"pigeon","target":"x"},
+                {"name":"Echo","kind":"webhook","target":"https://example.com/hook","answer":true},
+                {"name":"Bot","kind":"orca","target":"babyshark","answer":false}]}"#,
+        );
+        assert!(!settings.enter_sends);
+        let names: Vec<_> = settings
+            .external_tools
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(names, ["Echo", "Bot"]);
+        assert_eq!(
+            settings.external_tools[1].kind,
+            crate::external_tools::ToolKind::Orca
+        );
+        assert_eq!(stored["external_tools"].as_array().map(Vec::len), Some(2));
     }
 
     #[test]

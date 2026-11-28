@@ -3006,6 +3006,12 @@ pub enum Action {
     /// Forwards to the chosen recipients: one at once, several after
     /// their confirmation.
     ConfirmForward,
+    /// Opens the Forward dialog's step for the external tool at this index
+    /// of Settings, where the person may write it a prompt.
+    PickTool(usize),
+    /// Sends the Forward dialog's messages to the external tool at this
+    /// index of Settings.
+    SendToTool(usize),
     /// Starts selecting messages in the open chat, beginning with this one.
     SelectMessage(String),
     /// Adds a message to the selection or removes it.

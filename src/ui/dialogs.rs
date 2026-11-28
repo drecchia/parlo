@@ -646,6 +646,9 @@ fn forward(app: &mut App, ui: &mut egui::Ui, messages: &[String]) {
     ui.ctx().data_mut(|data| {
         data.insert_temp(egui::Id::new(("forward-layout", "footer")), footer_rect)
     });
+    if app.tool_pick.is_some() {
+        return super::external_tools::forward_step(app, ui, footer_rect.top());
+    }
     if app.forward_reviewing {
         theme::text(
             ui,
@@ -701,6 +704,7 @@ fn forward(app: &mut App, ui: &mut egui::Ui, messages: &[String]) {
         .cloned()
         .collect();
     chats.sort_by_key(|chat| std::cmp::Reverse(chat.last_activity));
+    super::external_tools::forward_rows(app, ui, &needle, footer_rect.top());
 
     let row_height = 52.0;
     let max_height = (footer_rect.top() - ui.cursor().top() - 8.0).max(1.0);
@@ -809,6 +813,9 @@ fn forward(app: &mut App, ui: &mut egui::Ui, messages: &[String]) {
 
 fn forward_footer(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
+    if app.tool_pick.is_some() {
+        return super::external_tools::forward_step_footer(app, ui);
+    }
     if app.forward_reviewing {
         ui.horizontal(|ui| {
             if theme::pill_button(

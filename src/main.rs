@@ -83,7 +83,7 @@ struct Cli {
     demo_titlebar: bool,
 
     /// Demo view: `chat`, `phone-menu`, `empty`, `settings`, `login`,
-    /// `pair`, `shortcuts`, `about`, `info`, `mention`, `voice-presence`, `light`, or a comma-separated
+    /// `pair`, `shortcuts`, `about`, `info`, `mention`, `voice-presence`, `light`, `dark`, or a comma-separated
     /// mix such as `chat,light`.
     #[cfg(feature = "demo")]
     #[arg(long)]

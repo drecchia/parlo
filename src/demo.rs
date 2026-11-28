@@ -237,6 +237,23 @@ fn media(mime: &str, size: u64, width: Option<u32>, height: Option<u32>) -> Medi
     }
 }
 
+/// External tools for the Forward dialog and Settings: one of each kind.
+fn sample_tools() -> Vec<crate::external_tools::Tool> {
+    vec![
+        crate::external_tools::Tool {
+            name: "Summarize".into(),
+            target: "https://tools.example/summarize".into(),
+            ..Default::default()
+        },
+        crate::external_tools::Tool {
+            name: "Research bot".into(),
+            kind: crate::external_tools::ToolKind::Orca,
+            target: "research".into(),
+            answer: false,
+        },
+    ]
+}
+
 /// Generates a speech-like demo waveform.
 fn demo_waveform() -> Vec<u8> {
     (0..crate::voice::BARS)
@@ -3072,12 +3089,26 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 app.scroll_to_bottom = true;
                 app.timer_saving.insert(chat.to_owned());
             }
-            "forward" | "forward-selected" | "forward-review" | "forward-full" | "forward-once" => {
+            "forward"
+            | "forward-selected"
+            | "forward-review"
+            | "forward-full"
+            | "forward-once"
+            | "forward-tools"
+            | "forward-tool-prompt" => {
                 app.dialog = app.open_chat.clone().map(|chat| Dialog::Forward {
                     chat,
                     messages: vec!["ada-format".to_owned()],
                 });
                 app.forward_limit = crate::model::FORWARD_LIMIT;
+                if part.starts_with("forward-tool") {
+                    app.settings.external_tools = sample_tools();
+                }
+                if part == "forward-tool-prompt" {
+                    app.tool_pick = Some(0);
+                    app.tool_prompt =
+                        "Summarize this negotiation and open a ticket with priority high".into();
+                }
                 match part {
                     "forward-selected" | "forward-review" => {
                         app.forward_recipients =
@@ -3107,6 +3138,11 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 }
             }
             "unlink" => app.dialog = Some(Dialog::ConfirmUnlink),
+            "settings-tools" => {
+                app.page = Page::Settings;
+                app.settings_search = "External tools".to_owned();
+                app.settings.external_tools = sample_tools();
+            }
             "clear-media" => {
                 app.dialog = Some(Dialog::ConfirmClearMediaCache(app.account().id.clone()));
             }
@@ -3317,6 +3353,9 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
             "pinned" => pin_sample(app),
             "light" => {
                 app.settings.theme = ThemeChoice::Light;
+            }
+            "dark" => {
+                app.settings.theme = ThemeChoice::Dark;
             }
             "messages" => {
                 app.settings.theme = ThemeChoice::Messages;
@@ -9745,6 +9784,9 @@ mod tests {
             "forward-review",
             "forward-full",
             "forward-once",
+            "forward-tools",
+            "forward-tool-prompt",
+            "settings-tools",
             "unlink",
             "leave-group",
             "left-group",
@@ -10499,6 +10541,8 @@ mod tests {
                 "forward",
                 "forward-selected",
                 "forward-once",
+                "forward-tools",
+                "forward-tool-prompt",
                 "forward-full",
                 "forward-review",
             ] {
@@ -10690,6 +10734,42 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A click on a tool row opens its step, with room to type, and sends
+    /// nothing.
+    #[test]
+    fn a_tool_row_click_opens_the_prompt_step_and_sends_nothing() {
+        let mut app = app();
+        app.backend.record_demo_commands();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        apply_flags(&mut app, Some("forward-tools"));
+        for _ in 0..3 {
+            render(&mut app, &ctx);
+        }
+        app.backend.take_demo_commands();
+        let row = ctx
+            .data(|data| data.get_temp::<egui::Rect>(egui::Id::new(("forward-tool", 0_usize))))
+            .expect("the first tool has a row");
+        press_at(&mut app, &ctx, row.center());
+        assert_eq!(app.tool_pick, Some(0));
+        render(&mut app, &ctx);
+        let field = ctx
+            .data(|data| data.get_temp::<egui::Rect>(egui::Id::new(("forward-layout", "prompt"))))
+            .expect("the step shows the prompt field");
+        assert!(field.height() >= 40.0, "{field:?}");
+        assert!(
+            !app.backend
+                .take_demo_commands()
+                .iter()
+                .any(|command| matches!(
+                    command,
+                    crate::backend::Command::SendToTool { .. }
+                        | crate::backend::Command::Forward { .. }
+                )),
+            "picking a tool sends nothing"
+        );
     }
 
     /// Presses and releases the primary button at `pos`.

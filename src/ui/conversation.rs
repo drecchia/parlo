@@ -5101,8 +5101,13 @@ pub(super) fn selected_text(app: &App) -> Option<String> {
     if app.open_chat.as_ref() != Some(chat) {
         return None;
     }
+    transcript_of(app, chat, selected)
+}
+
+/// The Ctrl+C transcript of these messages of a chat, in conversation order.
+pub(crate) fn transcript_of(app: &App, chat: &str, ids: &[String]) -> Option<String> {
     let conversation = app.conversations.get(chat)?;
-    let selected: HashSet<&str> = selected.iter().map(String::as_str).collect();
+    let selected: HashSet<&str> = ids.iter().map(String::as_str).collect();
     let names_or = |id: &str, hint: Option<&str>| app.display_name_or(id, hint);
     let mention_names = |id: &str| app.mention_name(id);
     let lines: Vec<String> = conversation

@@ -754,6 +754,11 @@ pub struct App {
     nav_history: History,
     /// Chat filter in the forwarding destination dialog.
     pub forward_search: String,
+    /// The Forward dialog's optional instructions for an external tool.
+    pub tool_prompt: String,
+    /// The external tool whose step the Forward dialog shows, by its index in
+    /// Settings; `None` while it lists destinations.
+    pub tool_pick: Option<usize>,
     /// Recipients chosen in the forwarding dialog, all chats of the account
     /// on screen, in the order they were picked.
     pub forward_recipients: Vec<ChatId>,
@@ -761,6 +766,8 @@ pub struct App {
     pub forward_reviewing: bool,
     /// How many recipients the forwarding dialog's messages may have.
     pub forward_limit: usize,
+    /// Sends to external tools waiting for their media to download.
+    tool_jobs: Vec<external_tools::ToolJob>,
     /// The group name being typed in the group info dialog.
     pub group_name_edit: Option<String>,
     /// The group description being typed in the info panel.
@@ -1711,9 +1718,12 @@ impl App {
             dialog: None,
             nav_history: History::default(),
             forward_search: String::new(),
+            tool_prompt: String::new(),
+            tool_pick: None,
             forward_recipients: Vec::new(),
             forward_reviewing: false,
             forward_limit: crate::model::FORWARD_LIMIT,
+            tool_jobs: Vec::new(),
             group_name_edit: None,
             group_description_edit: None,
             new_contact_to_phone: true,
@@ -1996,6 +2006,8 @@ impl App {
         self.gif_pending = false;
         self.gif_error = None;
         self.forward_recipients.clear();
+        self.tool_prompt.clear();
+        self.tool_pick = None;
         self.forward_reviewing = false;
         // The locked folder and the picker show the previous account's chats
         // and stickers.
@@ -4118,6 +4130,7 @@ impl App {
                     self.interactive_sending.remove(&(chat, message));
                 }
             }
+            Event::ToolAnswer { tool, chat, result } => self.tool_answered(tool, chat, result),
             Event::ForwardLimit {
                 from_chat,
                 messages,
@@ -4472,7 +4485,10 @@ impl App {
                 chat,
                 message,
                 result,
-            } => self.handle_media(&chat, &message, card, result),
+            } => {
+                self.handle_media(&chat, &message, card, result);
+                self.tool_job_step();
+            }
             Event::DownloadProgress {
                 chat,
                 message,
@@ -8234,7 +8250,10 @@ impl App {
                     self.forward_reviewing = true;
                 }
             }
-            Action::BackToForwardSelection => self.forward_reviewing = false,
+            Action::BackToForwardSelection => {
+                self.forward_reviewing = false;
+                self.tool_pick = None;
+            }
             Action::ConfirmForward => {
                 let Some(Dialog::Forward { chat, messages }) = self.dialog.clone() else {
                     return;
@@ -8281,9 +8300,13 @@ impl App {
                 self.follow_sent_chat();
                 self.dialog = None;
                 self.forward_search.clear();
+                self.tool_prompt.clear();
+                self.tool_pick = None;
                 self.forward_reviewing = false;
                 self.selection = None;
             }
+            Action::PickTool(index) => self.pick_tool(index),
+            Action::SendToTool(index) => self.send_to_tool(index),
             Action::StartSelection => {
                 // Choosing it again keeps what is already ticked.
                 if let Some(chat) = self.open_chat.clone()
@@ -9140,6 +9163,8 @@ impl App {
                 }
                 if let Dialog::Forward { chat, messages } = &dialog {
                     self.forward_search.clear();
+                    self.tool_prompt.clear();
+                    self.tool_pick = None;
                     self.forward_recipients.clear();
                     self.forward_reviewing = false;
                     // Until the worker has read the messages' forwarding
@@ -9186,6 +9211,8 @@ impl App {
                 };
                 self.invite = None;
                 self.forward_search.clear();
+                self.tool_prompt.clear();
+                self.tool_pick = None;
                 self.forward_recipients.clear();
                 self.forward_reviewing = false;
                 self.contact_edit = None;
@@ -12396,6 +12423,7 @@ fn notification_eligible(chat: &Chat, now: i64, message_at: i64) -> bool {
 }
 
 mod calls;
+mod external_tools;
 pub use calls::CallPerson;
 
 /// The character ranges of `text` to wrap in `format`'s markers for a
@@ -14015,6 +14043,279 @@ mod tests {
         );
         app.apply(Action::ToggleForwardRecipient("left".into()), &ctx);
         assert!(app.forward_recipients.is_empty());
+    }
+
+    fn tool_app() -> (
+        App,
+        tokio::sync::mpsc::UnboundedReceiver<Command>,
+        egui::Context,
+    ) {
+        let mut app = app();
+        let (backend, commands) = Backend::recording();
+        app.backend = backend;
+        app.settings.external_tools = vec![crate::external_tools::Tool {
+            name: "Echo".into(),
+            target: "https://example.com/hook".into(),
+            ..Default::default()
+        }];
+        let chat = "1@s.whatsapp.net";
+        app.chats = vec![Chat::new(chat.into(), "Ada".into())];
+        app.open_chat = Some(chat.into());
+        (app, commands, egui::Context::default())
+    }
+
+    /// The text, prompt and files of every tool send recorded.
+    fn tool_sends(
+        commands: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+    ) -> Vec<(String, Option<String>, Vec<crate::external_tools::ToolFile>)> {
+        std::iter::from_fn(|| commands.try_recv().ok())
+            .filter_map(|command| match command {
+                Command::SendToTool {
+                    text,
+                    prompt,
+                    files,
+                    ..
+                } => Some((text, prompt, files)),
+                Command::Forward { .. } => panic!("a tool send never forwards"),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_tool_gets_the_ctrl_c_text_and_nothing_is_forwarded() {
+        let (mut app, mut commands, ctx) = tool_app();
+        let chat = "1@s.whatsapp.net";
+        app.conversations.entry(chat.into()).or_default().merge(
+            vec![message(chat, "first", 1), message(chat, "second", 2)],
+            false,
+        );
+        app.apply(Action::SelectMessage("first".into()), &ctx);
+        app.apply(Action::ToggleSelected("second".into()), &ctx);
+        let ids = vec!["first".to_owned(), "second".to_owned()];
+        let expected = crate::ui::conversation::transcript_of(&app, chat, &ids).unwrap();
+        app.apply(
+            Action::ShowDialog(Dialog::Forward {
+                chat: chat.into(),
+                messages: ids,
+            }),
+            &ctx,
+        );
+        app.apply(Action::SendToTool(0), &ctx);
+        assert_eq!(tool_sends(&mut commands), [(expected, None, Vec::new())]);
+        assert!(app.dialog.is_none());
+        assert!(app.selection.is_none());
+    }
+
+    #[test]
+    fn a_prompt_reaches_the_tool_trimmed_and_a_blank_one_is_none() {
+        let (mut app, mut commands, ctx) = tool_app();
+        let chat = "1@s.whatsapp.net";
+        app.conversations
+            .entry(chat.into())
+            .or_default()
+            .merge(vec![message(chat, "first", 1)], false);
+        let dialog = Dialog::Forward {
+            chat: chat.into(),
+            messages: vec!["first".into()],
+        };
+        for (typed, sent) in [
+            ("  Summarize this\n", Some("Summarize this".to_owned())),
+            (" \n ", None),
+        ] {
+            app.apply(Action::ShowDialog(dialog.clone()), &ctx);
+            app.apply(Action::PickTool(0), &ctx);
+            app.tool_prompt = typed.into();
+            app.apply(Action::SendToTool(0), &ctx);
+            let sends = tool_sends(&mut commands);
+            assert_eq!(sends.len(), 1);
+            assert_eq!(sends[0].1, sent);
+            assert!(app.tool_prompt.is_empty(), "a send clears the prompt");
+            assert_eq!(app.tool_pick, None, "a send leaves the step");
+        }
+        // Opening the dialog again starts without the last prompt.
+        app.apply(Action::ShowDialog(dialog), &ctx);
+        app.tool_prompt = "left over".into();
+        app.apply(Action::CloseDialog, &ctx);
+        assert!(app.tool_prompt.is_empty());
+    }
+
+    #[test]
+    fn picking_a_tool_opens_its_step_and_back_keeps_the_prompt() {
+        let (mut app, mut commands, ctx) = tool_app();
+        app.apply(Action::PickTool(0), &ctx);
+        assert_eq!(app.tool_pick, None, "no step without the Forward dialog");
+        let dialog = Dialog::Forward {
+            chat: "1@s.whatsapp.net".into(),
+            messages: vec!["first".into()],
+        };
+        app.apply(Action::ShowDialog(dialog.clone()), &ctx);
+        app.apply(Action::PickTool(7), &ctx);
+        assert_eq!(app.tool_pick, None, "no step for a tool that is not there");
+        app.apply(Action::PickTool(0), &ctx);
+        assert_eq!(app.tool_pick, Some(0));
+        app.tool_prompt = "Summarize".into();
+        app.apply(Action::BackToForwardSelection, &ctx);
+        assert_eq!(app.tool_pick, None);
+        assert_eq!(app.tool_prompt, "Summarize", "Back keeps what was typed");
+        assert!(
+            tool_sends(&mut commands).is_empty(),
+            "picking sends nothing"
+        );
+        app.apply(Action::PickTool(0), &ctx);
+        app.apply(Action::ShowDialog(dialog), &ctx);
+        assert_eq!(app.tool_pick, None, "a new dialog starts at the list");
+    }
+
+    #[test]
+    fn media_is_downloaded_before_a_tool_send() {
+        let (mut app, mut commands, ctx) = tool_app();
+        let chat = "1@s.whatsapp.net";
+        let picture = Message {
+            content: Content::Image {
+                motion: None,
+                caption: Some("look".into()),
+                media: Media {
+                    mime: "image/jpeg".into(),
+                    size: 100,
+                    width: None,
+                    height: None,
+                    album: None,
+                    path: None,
+                    state: MediaState::Idle,
+                },
+            },
+            ..message(chat, "picture", 1)
+        };
+        app.conversations
+            .entry(chat.into())
+            .or_default()
+            .merge(vec![picture], false);
+        app.apply(
+            Action::ShowDialog(Dialog::Forward {
+                chat: chat.into(),
+                messages: vec!["picture".into()],
+            }),
+            &ctx,
+        );
+        app.tool_prompt = "Describe the photo".into();
+        app.apply(Action::SendToTool(0), &ctx);
+        app.apply_actions(&ctx);
+        let mut downloads = 0;
+        for command in std::iter::from_fn(|| commands.try_recv().ok()) {
+            match command {
+                Command::Download {
+                    manual: true,
+                    message,
+                    ..
+                } if message == "picture" => {
+                    downloads += 1;
+                }
+                Command::SendToTool { .. } => panic!("sent before the media downloaded"),
+                _ => {}
+            }
+        }
+        assert_eq!(downloads, 1);
+        let file = tempfile::Builder::new().suffix(".jpg").tempfile().unwrap();
+        app.apply_backend_event(
+            Event::Media {
+                card: None,
+                chat: chat.into(),
+                message: "picture".into(),
+                result: Ok(file.path().to_owned()),
+            },
+            true,
+        );
+        let sends = tool_sends(&mut commands);
+        assert_eq!(sends.len(), 1);
+        assert_eq!(sends[0].1.as_deref(), Some("Describe the photo"));
+        assert_eq!(sends[0].2.len(), 1);
+        assert_eq!(sends[0].2[0].name, "1.jpg");
+        assert_eq!(sends[0].2[0].path, file.path());
+    }
+
+    #[test]
+    fn a_lock_during_the_download_stops_the_tool_send() {
+        let (mut app, mut commands, ctx) = tool_app();
+        let chat = "1@s.whatsapp.net";
+        let voice = Message {
+            content: Content::Audio {
+                media: Media {
+                    mime: "audio/ogg".into(),
+                    size: 100,
+                    width: None,
+                    height: None,
+                    album: None,
+                    path: None,
+                    state: MediaState::Idle,
+                },
+                seconds: Some(3),
+                voice_note: true,
+                waveform: Vec::new(),
+            },
+            ..message(chat, "voice", 1)
+        };
+        app.conversations
+            .entry(chat.into())
+            .or_default()
+            .merge(vec![voice], false);
+        app.apply(
+            Action::ShowDialog(Dialog::Forward {
+                chat: chat.into(),
+                messages: vec!["voice".into()],
+            }),
+            &ctx,
+        );
+        app.apply(Action::SendToTool(0), &ctx);
+        assert!(tool_sends(&mut commands).is_empty());
+        app.app_lock = crate::app_lock::AppLock::new(true);
+        let file = tempfile::Builder::new().suffix(".ogg").tempfile().unwrap();
+        app.apply_backend_event(
+            Event::Media {
+                card: None,
+                chat: chat.into(),
+                message: "voice".into(),
+                result: Ok(file.path().to_owned()),
+            },
+            true,
+        );
+        assert!(tool_sends(&mut commands).is_empty());
+        assert!(app.tool_jobs.is_empty());
+    }
+
+    #[test]
+    fn a_tool_answer_is_a_draft_and_is_never_sent() {
+        let (mut app, mut commands, _ctx) = tool_app();
+        app.apply_backend_event(
+            Event::ToolAnswer {
+                tool: "Echo".into(),
+                chat: "1@s.whatsapp.net".into(),
+                result: Ok(Some("pong".into())),
+            },
+            true,
+        );
+        assert_eq!(app.composer, "pong");
+        assert!(
+            std::iter::from_fn(|| commands.try_recv().ok())
+                .all(|command| matches!(command, Command::SaveDraft { .. })),
+            "only the draft is stored"
+        );
+    }
+
+    #[test]
+    fn a_tool_answer_never_replaces_typed_text() {
+        let (mut app, _commands, _ctx) = tool_app();
+        app.composer = "typing".into();
+        app.apply_backend_event(
+            Event::ToolAnswer {
+                tool: "Echo".into(),
+                chat: "1@s.whatsapp.net".into(),
+                result: Ok(Some("pong".into())),
+            },
+            true,
+        );
+        assert_eq!(app.composer, "typing");
+        assert!(app.actions.contains(&Action::CopyText("pong".into())));
     }
 
     /// Unrelated dialogs do not cancel a shared-contact lookup.

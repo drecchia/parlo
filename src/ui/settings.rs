@@ -904,6 +904,12 @@ fn sections(app: &App) -> Vec<Section> {
         |ui, app| about(app, ui),
     );
 
+    let mut external_tools = Section::new("External tools".into());
+    external_tools.block(
+        vec!["Webhook".into(), "Orca bot".into()],
+        super::external_tools::settings,
+    );
+
     vec![
         appearance,
         chats,
@@ -912,6 +918,7 @@ fn sections(app: &App) -> Vec<Section> {
         system,
         account_section,
         files,
+        external_tools,
         about_section,
     ]
 }
