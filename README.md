@@ -124,6 +124,14 @@ messages through the linked account. It is read-only by default and reuses the
 existing backend, and can share the open window through a private socket. See [docs/MCP.md](docs/MCP.md).
 
 
+## Remote transcription
+
+The `remote-transcription` feature branch adds manual transcription of voice
+messages through an OpenAI-compatible provider (OpenAI, Grok, Gemini or a
+local server). Pick the provider in **Settings → Transcription**; the API key
+stays in the OS keyring. Right-click a voice message and choose
+**Transcribe**: the audio is sent only to the endpoint you configure.
+
 ## More native apps
 
 **Want Spotify just as fast and native?** [Spotifast](https://spotifast.rocks)

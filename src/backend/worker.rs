@@ -1081,6 +1081,8 @@ pub async fn run(
         stars_recovered,
         stars_recovering: false,
         downloads: HashSet::new(),
+        transcriptions: HashSet::new(),
+        pending_transcriptions: HashMap::new(),
         read_sync: ReadSync::default(),
         favorite_chats: Default::default(),
         poll_decrypting: 0,
@@ -1712,6 +1714,10 @@ struct Worker {
     stars_recovering: bool,
     /// Active attachment downloads by chat, message id, and carousel card.
     downloads: HashSet<(ChatId, String, Option<usize>)>,
+    /// Active remote transcriptions by chat and message id.
+    transcriptions: HashSet<(ChatId, String)>,
+    /// Configurations awaiting an attachment download before transcription.
+    pending_transcriptions: HashMap<(ChatId, String), crate::transcribe::TranscriptionConfig>,
     /// Serial forward in flight. The next send waits for the running one.
     forward_queue: Option<ForwardQueue<ForwardJob>>,
     call: Option<calls::CallRuntime>,
@@ -7599,6 +7605,16 @@ impl Worker {
                     let _ = self.archive.set_ephemeral(&chat, expiration, timestamp);
                 }
             }
+            Command::Transcribe {
+                chat,
+                message,
+                config,
+            } => self.transcribe(chat, message, config),
+            Command::TranscriptionResult {
+                chat,
+                message,
+                result,
+            } => self.transcription_result(chat, message, result),
             Command::Download {
                 manual,
                 card,
@@ -10633,6 +10649,13 @@ impl Worker {
         result: Result<PathBuf, String>,
     ) {
         self.downloads.remove(&(chat.clone(), id.clone(), card));
+        // A transcription waiting on this voice message's download.
+        let transcribe = match card {
+            None => self
+                .pending_transcriptions
+                .remove(&(chat.clone(), id.clone())),
+            Some(_) => None,
+        };
         let key = (chat.clone(), id.clone());
         let for_picker = self.sticker_downloads.remove(&key);
         let clicked = self.sticker_clicked.remove(&key);
@@ -10668,12 +10691,21 @@ impl Worker {
                 .insert((chat.clone(), id.clone()));
         }
         let result_ok = result.is_ok();
+        let downloaded_path = result.as_ref().ok().cloned();
         self.emit(Event::Media {
             card,
-            chat,
-            message: id,
+            chat: chat.clone(),
+            message: id.clone(),
             result,
         });
+        if let Some(config) = transcribe {
+            match downloaded_path {
+                Some(path) => self.start_transcription(chat.clone(), id.clone(), config, path),
+                None => {
+                    self.transcriptions.remove(&(chat.clone(), id.clone()));
+                }
+            }
+        }
         if retried && !for_picker && result_ok {
             self.emit_stickers();
         }
@@ -10682,6 +10714,122 @@ impl Worker {
             self.fetch_missing_stickers();
             self.picker_sticker_settled(result_ok);
         }
+    }
+
+    /// Starts a manual transcription: serves the cache when possible, triggers
+    /// the attachment download when needed, and otherwise sends the request.
+    fn transcribe(
+        &mut self,
+        chat: ChatId,
+        id: String,
+        config: crate::transcribe::TranscriptionConfig,
+    ) {
+        if !self.transcriptions.insert((chat.clone(), id.clone())) {
+            return;
+        }
+        if let Ok(Some(text)) = self.archive.transcription(&chat, &id) {
+            self.transcriptions.remove(&(chat.clone(), id.clone()));
+            self.emit(Event::Transcribed {
+                chat,
+                message: id,
+                text: Ok(text),
+            });
+            return;
+        }
+        let path = self
+            .archive
+            .message(&chat, &id)
+            .ok()
+            .flatten()
+            .and_then(|message| message.content.media().and_then(|media| media.path.clone()));
+        match path {
+            Some(path) if path.is_file() => self.start_transcription(chat, id, config, path),
+            _ => {
+                self.pending_transcriptions
+                    .insert((chat.clone(), id.clone()), config);
+                self.download(chat, id);
+            }
+        }
+    }
+    /// Validates the request, reads the API key from the keyring, and runs the
+    /// blocking HTTP request off the worker thread.
+    fn start_transcription(
+        &mut self,
+        chat: ChatId,
+        id: String,
+        config: crate::transcribe::TranscriptionConfig,
+        path: PathBuf,
+    ) {
+        let request = match crate::transcribe::Request::build(&config) {
+            Ok(request) => request,
+            Err(error) => {
+                self.transcriptions.remove(&(chat.clone(), id.clone()));
+                self.emit(Event::Transcribed {
+                    chat,
+                    message: id,
+                    text: Err(error),
+                });
+                return;
+            }
+        };
+        let api_key = match crate::transcribe::api_key() {
+            Ok(Some(key)) => key,
+            Ok(None) => {
+                self.transcriptions.remove(&(chat.clone(), id.clone()));
+                self.emit(Event::Transcribed {
+                    chat,
+                    message: id,
+                    text: Err("Set your transcription API key in Settings".to_owned()),
+                });
+                return;
+            }
+            Err(error) => {
+                self.transcriptions.remove(&(chat.clone(), id.clone()));
+                self.emit(Event::Transcribed {
+                    chat,
+                    message: id,
+                    text: Err(format!(
+                        "Could not read the transcription API key: {error:#}"
+                    )),
+                });
+                return;
+            }
+        };
+        let commands = self.commands.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = crate::transcribe::transcribe(&request, &path, &api_key);
+            let _ = commands.send(Command::TranscriptionResult {
+                chat,
+                message: id,
+                result,
+            });
+        });
+    }
+    /// Files a finished transcription in the cache and reports it to the UI.
+    fn transcription_result(
+        &mut self,
+        chat: ChatId,
+        id: String,
+        result: Result<crate::transcribe::Completed, String>,
+    ) {
+        self.transcriptions.remove(&(chat.clone(), id.clone()));
+        if let Ok(completed) = &result {
+            let transcription = crate::archive::Transcription {
+                text: completed.text.clone(),
+                provider_kind: completed.provider_kind.clone(),
+                model: completed.model.clone(),
+                source_sha256: completed.source_sha256.clone(),
+                created_at: crate::util::now(),
+            };
+            if let Err(error) = self.archive.set_transcription(&chat, &id, &transcription) {
+                log::warn!("could not cache the transcription: {error}");
+            }
+        }
+        self.emit(Event::Transcribed {
+            chat,
+            message: id,
+            text: result.map(|completed| completed.text),
+        });
     }
 
     /// Sends the picker its shelves after a picker download settles: once
@@ -11093,6 +11241,7 @@ impl Worker {
                     older: before.is_some(),
                     complete,
                 });
+                self.emit_transcripts(chat);
             }
             Err(error) => self.emit(Event::Error(format!("Could not read the chat: {error}"))),
         }
@@ -12174,6 +12323,21 @@ impl Worker {
             Ok(true) => self.emit_pins(chat),
             Ok(false) => {}
             Err(error) => self.emit(Event::Error(error.to_string())),
+        }
+    }
+
+    /// Sends a chat's cached transcriptions to the interface.
+    fn emit_transcripts(&self, chat: &str) {
+        match self.archive.transcriptions_for_chat(chat) {
+            Ok(transcripts) => {
+                if !transcripts.is_empty() {
+                    self.emit(Event::Transcripts {
+                        chat: chat.to_owned(),
+                        transcripts,
+                    });
+                }
+            }
+            Err(error) => log::warn!("could not list transcriptions: {error}"),
         }
     }
 
@@ -20463,6 +20627,8 @@ mod receipt_tests {
             stars_recovered: true,
             stars_recovering: false,
             downloads: HashSet::new(),
+            transcriptions: HashSet::new(),
+            pending_transcriptions: HashMap::new(),
             read_sync: ReadSync::default(),
             favorite_chats: Default::default(),
             poll_decrypting: 0,

@@ -806,6 +806,8 @@ fn sections(app: &App) -> Vec<Section> {
         },
     );
 
+    let transcription = transcription_section(app);
+
     let mut account_section = Section::new(translated(locale, "Account"));
     account_section.block(
         vec![
@@ -926,10 +928,113 @@ fn sections(app: &App) -> Vec<Section> {
         notifications,
         privacy,
         system,
+        transcription,
         account_section,
         files,
         about_section,
     ]
+}
+
+/// Remote speech-to-text for voice messages: provider, endpoint, model and
+/// the API key, which lives only in the OS keyring.
+fn transcription_section(app: &App) -> Section {
+    use crate::settings::TranscriptionProvider;
+    let palette = app.palette;
+    let provider = app.settings.transcription_provider;
+    let mut section = Section::new("Transcription".into());
+    section.row(
+        "Provider",
+        "Remote speech-to-text for voice messages. The audio is sent to the provider you choose.",
+        move |ui, app| {
+            let selected = app.settings.transcription_provider.label();
+            egui::ComboBox::from_id_salt("transcription_provider")
+                .selected_text(selected)
+                .width(200.0_f32.min(ui.available_width()))
+                .show_ui(ui, |ui| {
+                    for choice in TranscriptionProvider::ALL {
+                        if theme_option(
+                            ui,
+                            &palette,
+                            choice.label(),
+                            app.settings.transcription_provider == choice,
+                        ) {
+                            app.settings.transcription_provider = choice;
+                            app.actions.push(Action::SettingsChanged);
+                        }
+                    }
+                });
+        },
+    );
+    if provider == TranscriptionProvider::None {
+        return section;
+    }
+    section.row(
+        "Endpoint",
+        "HTTPS only; HTTP is accepted only for localhost. Empty uses the provider's default.",
+        move |ui, app| {
+            let default = provider.default_base_url().unwrap_or_default();
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut app.settings.transcription_base_url)
+                    .font(theme::regular(13.0))
+                    .text_color(palette.text)
+                    .desired_width(260.0)
+                    .hint_text(default),
+            );
+            if response.changed() {
+                app.actions.push(Action::SettingsChanged);
+            }
+        },
+    );
+    section.row(
+        "Model",
+        "The provider's transcription model. Empty uses the provider's default.",
+        move |ui, app| {
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut app.settings.transcription_model)
+                    .font(theme::regular(13.0))
+                    .text_color(palette.text)
+                    .desired_width(220.0)
+                    .hint_text(provider.default_model()),
+            );
+            if response.changed() {
+                app.actions.push(Action::SettingsChanged);
+            }
+        },
+    );
+    section.row(
+        "API key",
+        "Stored in your OS keyring, never in settings or logs.",
+        move |ui, app| {
+            // The keyring holds the only stored copy; the draft lives in egui
+            // memory until it is saved.
+            let id = ui.id().with("transcription_api_key");
+            let mut key: String = ui.data_mut(|data| data.get_temp(id).unwrap_or_default());
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut key)
+                    .font(theme::regular(13.0))
+                    .text_color(palette.text)
+                    .desired_width(180.0)
+                    .hint_text(if app.transcription_key_set {
+                        "Saved in keyring"
+                    } else {
+                        "API key"
+                    })
+                    .password(true),
+            );
+            let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if enter || ui.small_button("Save").clicked() {
+                app.actions
+                    .push(Action::SetTranscriptionKey(key.trim().to_owned()));
+                key.clear();
+            }
+            if app.transcription_key_set && ui.small_button("Clear").clicked() {
+                key.clear();
+                app.actions.push(Action::ClearTranscriptionKey);
+            }
+            ui.data_mut(|data| data.insert_temp(id, key));
+        },
+    );
+    section
 }
 
 /// The app lock: a password, how long ZapFast may go unused, and the form

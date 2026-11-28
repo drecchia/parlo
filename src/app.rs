@@ -183,6 +183,8 @@ const VOICE_FETCH_HOLD: Duration = Duration::from_secs(10);
 #[derive(Default)]
 pub struct Conversation {
     pub messages: Vec<Message>,
+    /// Cached transcription text by message id.
+    pub transcripts: HashMap<String, String>,
     /// Whether the local archive has no earlier messages.
     pub complete: bool,
     pub loading_older: bool,
@@ -565,6 +567,8 @@ pub struct App {
     pub info_invite: Option<(ChatId, crate::group_admin::LinkState)>,
     /// The panel control that takes the keyboard on the next frame.
     pub(crate) info_focus: Option<InfoFocus>,
+    /// Whether a transcription API key is stored in the OS keyring.
+    pub transcription_key_set: bool,
     /// Whether the locked-chats folder is open.
     pub locked_folder: bool,
     /// The verifier authenticated for this window session, never the code.
@@ -1628,6 +1632,7 @@ impl App {
             chat_search_month: crate::util::today(),
             chat_search_calendar: false,
             focus_chat_search: false,
+            transcription_key_set: crate::transcribe::has_api_key(),
             locked_folder: false,
             chat_lock_session: None,
             chat_lock_entry: String::new(),
@@ -4568,6 +4573,26 @@ impl App {
                             }
                         }
                     }
+                }
+            }
+            Event::Transcribed {
+                chat,
+                message,
+                text,
+            } => match text {
+                Ok(text) => {
+                    self.conversations
+                        .entry(chat)
+                        .or_default()
+                        .transcripts
+                        .insert(message, text);
+                }
+                Err(error) => self.toast_error(error),
+            },
+            Event::Transcripts { chat, transcripts } => {
+                let conversation = self.conversations.entry(chat).or_default();
+                for (message, text) in transcripts {
+                    conversation.transcripts.insert(message, text);
                 }
             }
             Event::Syncing(syncing) => {
@@ -8065,6 +8090,44 @@ impl App {
                     preview.show_album_item(path, item.id.clone(), item.card);
                 }
             }
+            Action::Transcribe { chat, message } => {
+                let provider = self.settings.transcription_provider;
+                let config = crate::transcribe::TranscriptionConfig::resolve(
+                    provider,
+                    &self.settings.transcription_base_url,
+                    &self.settings.transcription_model,
+                );
+                self.backend.send(Command::Transcribe {
+                    chat,
+                    message,
+                    config,
+                });
+            }
+            Action::SetTranscriptionKey(key) => {
+                let trimmed = key.trim().to_owned();
+                match crate::transcribe::set_api_key(&trimmed) {
+                    Ok(()) => {
+                        self.transcription_key_set = !trimmed.is_empty();
+                        if trimmed.is_empty() {
+                            self.toast("Transcription API key removed");
+                        } else {
+                            self.toast("Transcription API key saved");
+                        }
+                    }
+                    Err(error) => self.toast_error(format!(
+                        "Could not save the transcription API key: {error:#}"
+                    )),
+                }
+            }
+            Action::ClearTranscriptionKey => match crate::transcribe::clear_api_key() {
+                Ok(()) => {
+                    self.transcription_key_set = false;
+                    self.toast("Transcription API key removed");
+                }
+                Err(error) => self.toast_error(format!(
+                    "Could not remove the transcription API key: {error:#}"
+                )),
+            },
             Action::OpenFile(path) => {
                 let allowed = crate::safety::can_open_attachment(&path);
                 if allowed && matches!(path.try_exists(), Ok(false)) {

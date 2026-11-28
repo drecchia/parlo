@@ -66,6 +66,16 @@ pub struct Archive {
     connection: Connection,
 }
 
+/// A cached transcription for a single message.
+#[derive(Clone, Debug)]
+pub struct Transcription {
+    pub text: String,
+    pub provider_kind: String,
+    pub model: String,
+    pub source_sha256: String,
+    pub created_at: i64,
+}
+
 pub type Result<T> = std::result::Result<T, rusqlite::Error>;
 
 /// Writes that commit together, or not at all.
@@ -219,6 +229,16 @@ END;
 -- One person can be both a privacy id and a phone number; merging the two
 -- looks receipts up by recipient, and the primary key cannot serve that.
 CREATE INDEX IF NOT EXISTS group_receipts_by_recipient ON group_receipts (recipient);
+CREATE TABLE IF NOT EXISTS transcriptions (
+    chat TEXT NOT NULL,
+    message TEXT NOT NULL,
+    text TEXT NOT NULL,
+    provider_kind TEXT NOT NULL,
+    model TEXT NOT NULL,
+    source_sha256 TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (chat, message)
+);
 ";
 
 const CHAT_COLUMNS: &str =
@@ -2316,6 +2336,7 @@ impl Archive {
             "local_chat_labels",
             "drafts",
             "stars",
+            "transcriptions",
         ] {
             self.connection.execute(
                 &format!("DELETE FROM {table} WHERE chat = ?1"),
@@ -2860,6 +2881,57 @@ impl Archive {
         rows.collect()
     }
 
+    /// Stores a transcription, replacing any previous one for the message.
+    pub fn set_transcription(
+        &self,
+        chat: &str,
+        message: &str,
+        transcription: &Transcription,
+    ) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO transcriptions (chat, message, text, provider_kind, model, source_sha256, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(chat, message) DO UPDATE SET
+                text = excluded.text,
+                provider_kind = excluded.provider_kind,
+                model = excluded.model,
+                source_sha256 = excluded.source_sha256,
+                created_at = excluded.created_at",
+            params![
+                chat,
+                message,
+                transcription.text,
+                transcription.provider_kind,
+                transcription.model,
+                transcription.source_sha256,
+                transcription.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Returns a message's cached transcription text, if any.
+    pub fn transcription(&self, chat: &str, message: &str) -> Result<Option<String>> {
+        self.connection
+            .query_row(
+                "SELECT text FROM transcriptions WHERE chat = ?1 AND message = ?2",
+                params![chat, message],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
+    /// Returns every cached transcription for a chat as `(message, text)`.
+    pub fn transcriptions_for_chat(&self, chat: &str) -> Result<Vec<(String, String)>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT message, text FROM transcriptions WHERE chat = ?1")?;
+        let rows = statement.query_map(params![chat], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect()
+    }
+
     pub fn meta(&self, key: &str) -> Result<Option<String>> {
         self.connection
             .query_row(
@@ -2958,7 +3030,7 @@ impl Archive {
     /// Clears all archived data during unlinking.
     pub fn clear(&self) -> Result<()> {
         self.connection.execute_batch(
-            "DELETE FROM poll_history; DELETE FROM poll_votes; DELETE FROM polls; DELETE FROM group_receipts; DELETE FROM messages; DELETE FROM stars; DELETE FROM motion_clips; DELETE FROM chats; DELETE FROM chat_removals; DELETE FROM message_removals; DELETE FROM pending_message_removals; DELETE FROM contacts; DELETE FROM meta; DELETE FROM lids; DELETE FROM drafts; DELETE FROM local_chat_labels; DELETE FROM local_labels; DELETE FROM removed_recent_stickers; DELETE FROM favorite_stickers; DELETE FROM favorites; DELETE FROM favorite_changes;",
+            "DELETE FROM poll_history; DELETE FROM poll_votes; DELETE FROM polls; DELETE FROM group_receipts; DELETE FROM messages; DELETE FROM stars; DELETE FROM motion_clips; DELETE FROM chats; DELETE FROM chat_removals; DELETE FROM message_removals; DELETE FROM pending_message_removals; DELETE FROM contacts; DELETE FROM meta; DELETE FROM lids; DELETE FROM drafts; DELETE FROM local_chat_labels; DELETE FROM local_labels; DELETE FROM removed_recent_stickers; DELETE FROM favorite_stickers; DELETE FROM favorites; DELETE FROM favorite_changes; DELETE FROM transcriptions;",
         )
     }
 }
@@ -6387,6 +6459,74 @@ mod sticker_tests {
             .map(|sticker| sticker.path.display().to_string())
             .collect();
         assert_eq!(listed, vec![open]);
+    }
+
+    #[test]
+    fn transcriptions_round_trip_and_replace_within_a_chat() {
+        let archive = Archive::in_memory().expect("opens");
+        let chat = "a@s.whatsapp.net";
+        archive.ensure_chat(chat, "A").expect("chat");
+
+        assert_eq!(archive.transcription(chat, "m1").expect("read"), None);
+
+        let first = Transcription {
+            text: "hello there".into(),
+            provider_kind: "openai".into(),
+            model: "whisper-1".into(),
+            source_sha256: "aaa".into(),
+            created_at: 100,
+        };
+        archive
+            .set_transcription(chat, "m1", &first)
+            .expect("stored");
+        assert_eq!(
+            archive.transcription(chat, "m1").expect("read"),
+            Some("hello there".into())
+        );
+
+        // A newer transcription replaces the old one for the same message.
+        let second = Transcription {
+            text: "hello again".into(),
+            provider_kind: "grok".into(),
+            model: "whisper-1".into(),
+            source_sha256: "bbb".into(),
+            created_at: 200,
+        };
+        archive
+            .set_transcription(chat, "m1", &second)
+            .expect("stored");
+        archive
+            .set_transcription(
+                chat,
+                "m2",
+                &Transcription {
+                    text: "another".into(),
+                    provider_kind: "gemini".into(),
+                    model: "whisper-1".into(),
+                    source_sha256: "ccc".into(),
+                    created_at: 300,
+                },
+            )
+            .expect("stored");
+
+        let all = archive.transcriptions_for_chat(chat).expect("lists");
+        let mut all = all;
+        all.sort();
+        assert_eq!(
+            all,
+            vec![
+                ("m1".to_owned(), "hello again".to_owned()),
+                ("m2".to_owned(), "another".to_owned()),
+            ]
+        );
+
+        // Other chats stay isolated.
+        assert!(
+            archive
+                .transcriptions_for_chat("b@s.whatsapp.net")
+                .expect("lists")
+                .is_empty()
+        );
     }
 }
 
