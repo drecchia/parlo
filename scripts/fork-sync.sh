@@ -85,9 +85,11 @@ mkdir -p "$RR"
 
 unmerged() { [ -n "$(git diff --name-only --diff-filter=U)" ]; }
 
-# Rebase onto main; when rerere resolved every conflict, carry on by itself.
+# Rebase onto main, folding `fixup! <subject>` commits (a pull request
+# squash-merged under that title) into the commit they name, so each branch
+# stays one commit. When rerere resolved every conflict, carry on by itself.
 rebase_onto_main() {
-  git rebase main && return 0
+  GIT_SEQUENCE_EDITOR=true git rebase -q -i --autosquash main && return 0
   local tries=0
   while [ "$tries" -lt 100 ]; do
     tries=$((tries + 1))

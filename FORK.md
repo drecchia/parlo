@@ -25,9 +25,9 @@ Two workflows, so that a failure says which half failed:
    its history or the key stopped working. When `release` does not contain
    `main` yet, it starts the second workflow.
 2. **`Build release`** (`.github/workflows/fork-release.yml`, started by the
-   first, or *Run workflow* after a push to `fork/tooling` or a `feat/*`
-   branch): one step per stage of `scripts/fork-sync.sh`, so the red step is
-   the answer:
+   first, or *Run workflow* after a pull request is merged into `fork/tooling`
+   or a `feat/*` branch): one step per stage of `scripts/fork-sync.sh`, so
+   the red step is the answer:
 
    | Step | A failure means |
    |---|---|
@@ -35,7 +35,7 @@ Two workflows, so that a failure says which half failed:
    | Rebase the branches onto main | a branch conflicts with the new upstream |
    | Merge the branches into release | two branches conflict with each other |
    | Clippy, Tests | a feature's code no longer passes on the new upstream |
-   | Push release and the branches | a branch was pushed during the run: run it again |
+   | Push release and the branches | a branch changed during the run: run it again |
 
    Nothing on GitHub changes before the push step: `release` keeps its last
    good version, and the workflow opens (or comments on) an issue labelled
@@ -98,12 +98,19 @@ Deploy keys* with write access, and the private key as the Actions secret
 
 ## Rules that keep the rebase cheap
 
-- One squashed commit per feature. Fixes go in with `git commit --fixup`
-  followed by `git rebase -i --autosquash main`.
+- One commit per feature. A change to an existing `feat/*` branch or to
+  `fork/tooling` goes through a pull request: a `dev/<topic>` branch from
+  that branch, a pull request back into it titled
+  `fixup! <the branch's commit subject>`, squash-merged under that title.
+  The squash commit is then a fixup, and the next `Build release` folds it
+  into the branch's one commit (`git rebase -i --autosquash` in its rebase
+  stage). With one commit in the pull request GitHub takes that commit's
+  message as the squash title, so give the commit the same `fixup!` title.
 - New code goes in new files (`src/mcp/`, `src/transcribe.rs`). Changes to
   upstream files stay at small hook points.
-- A new feature means a new `feat/*` branch from `main`, added to
-  `BRANCHES` in the script.
+- A new feature means a new `feat/*` branch from `main`, pushed with its
+  first commit, and a pull request into `fork/tooling` that adds it to
+  `BRANCHES` in the script and to the table and the Risk section here.
 - Never push to `upstream`: its push URL is set to `no-push`.
 
 ## Risk

@@ -2,7 +2,9 @@
 #
 # Rebuilds release: rebases fork/tooling and feat/* onto main, merges them,
 # lints, tests, and only then pushes. Started by "Mirror main" when main moved,
-# or by hand (Run workflow) after a push to fork/tooling or a feat/* branch.
+# or by hand (Run workflow) after a pull request is merged into fork/tooling
+# or a feat/* branch. Its rebase stage folds the `fixup!` commits those
+# squash merges leave, so each branch stays one commit.
 #
 # One step per stage of scripts/fork-sync.sh, so the red step says what
 # failed. Until the push step, nothing on GitHub changes: release keeps its
