@@ -85,15 +85,19 @@ mkdir -p "$RR"
 
 unmerged() { [ -n "$(git diff --name-only --diff-filter=U)" ]; }
 
-# Rebase onto main; when rerere resolved every conflict, carry on by itself.
+# Rebase onto main, folding `fixup! <subject>` commits (a pull request
+# squash-merged under that title) into the commit they name, so each branch
+# stays one commit. When rerere resolved every conflict, carry on by itself.
 rebase_onto_main() {
-  git rebase main && return 0
+  GIT_SEQUENCE_EDITOR=true git rebase -q -i --autosquash main && return 0
   local tries=0
   while [ "$tries" -lt 100 ]; do
     tries=$((tries + 1))
-    unmerged && return 1
+    # A failure that left no rebase in progress never got going: report it,
+    # rather than push the branch as it was.
     [ -d "$(git rev-parse --git-path rebase-merge)" ] ||
-      [ -d "$(git rev-parse --git-path rebase-apply)" ] || return 0
+      [ -d "$(git rev-parse --git-path rebase-apply)" ] || return 1
+    unmerged && return 1
     echo "rerere resolved the conflict; continuing"
     GIT_EDITOR=true git rebase --continue && return 0
   done
@@ -165,12 +169,22 @@ if stage rebase; then
     git checkout -q "$branch"
     if ! rebase_onto_main; then
       echo
-      echo "conflict rebasing $branch onto main ($(git rev-parse --short main))." >&2
+      echo "rebasing $branch onto main ($(git rev-parse --short main)) stopped: a conflict, or git's error above." >&2
       echo "Resolve it, run 'git rebase --continue', then rerun this script with --push;" >&2
       echo "the resolution is saved to $RERERE_BRANCH and replayed from then on." >&2
       exit 1
     fi
-    echo "$branch rebased: $(git rev-list --count main..HEAD) commit(s) ahead"
+    # One commit per branch: a pull request squash-merged without its
+    # `fixup! <subject>` title stays a commit of its own and stops here.
+    ahead=$(git rev-list --count main..HEAD)
+    if [ "$ahead" != 1 ]; then
+      first=$(git rev-list --reverse main..HEAD | head -n 1)
+      echo "$branch is $ahead commits over main, and each branch is one commit:" >&2
+      git log --format='  %h %s' main..HEAD >&2
+      echo "squash-merge its pull requests as 'fixup! $(git log -1 --format=%s "$first")'." >&2
+      exit 1
+    fi
+    echo "$branch rebased: 1 commit ahead"
   done
   # Back to the branch this script lives on: the next stage is run from it.
   git checkout -q fork/tooling

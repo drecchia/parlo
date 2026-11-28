@@ -13,32 +13,38 @@ The remote decides: every step starts from `git fetch origin`, and `origin/<bran
 
 | Change | Branch |
 |---|---|
-| Code or docs of one feature | that feature's `feat/<name>` |
-| `FORK.md`, `scripts/fork-sync*.sh`, `.github/workflows/fork-*.yml`, this skill | `fork/tooling` |
+| Code or docs of one feature | a pull request into that feature's `feat/<name>` |
+| `FORK.md`, `scripts/fork-sync*.sh`, `.github/workflows/fork-*.yml`, this skill | a pull request into `fork/tooling` |
+| A new feature | a new `feat/<name>` from `main`, pushed with its first commit, plus a pull request into `fork/tooling` for `BRANCHES` |
 | Process summary in Portuguese | issue #1 (`gh issue edit 1 -R drecchia/parlo`) |
-| Anything | never `main`, never `release` |
+| Anything | never `main`, never `release`; no direct push to an existing `feat/*` or `fork/tooling` |
 
 ## Traps
 
 - **GitHub builds `release`, not this machine.** `Build release` runs the stages of `scripts/fork-sync.sh` on Linux. Run the script locally only to resolve a conflict (see `FORK.md`), and on Windows only under Git Bash (`"/c/Program Files/Git/bin/bash.exe" scripts/fork-sync.sh`).
 - **Two sources.** Workflow files are read from `release`; `Build release` checks out `fork/tooling` and runs the script from there. A script fix works on the next run. A workflow-file fix works only after one green build.
-- **One build at a time.** Runs queue. While one is in progress, push nothing to `fork/tooling` or `feat/*`: its push step is leased and will be refused.
+- **One build at a time.** Runs queue. While one is in progress, merge no pull request into `fork/tooling` or `feat/*`: the build's push step is leased and will be refused.
 - **Runs you did not start belong to the owner.** Leave them queued or running.
 - **`gh` needs `-R drecchia/parlo`.** With the `upstream` remote present it targets `crmne/zapfast`.
 - **Run the script from the checked-out `fork/tooling`,** never from a copy taken out of another commit.
 
 ## Publish a change
 
-1. `git fetch origin`. For each branch you will push, compare `git rev-parse <branch> origin/<branch>`. If they differ and the difference is not your own unpushed commit, take origin's: `git reset --hard origin/<branch>`, then redo your change on top.
-   Done when: every branch you will push is origin's tip plus only your commit.
-2. Keep one commit per branch: `git commit --fixup <sha>`, then `GIT_SEQUENCE_EDITOR=true git rebase -i --autosquash main`.
-3. New `feat/<name>` branch only: on `fork/tooling`, add it to `BRANCHES` in `scripts/fork-sync.sh` and to the table and the Risk section of `FORK.md`.
-4. Changed `scripts/fork-sync.sh` only: run `scripts/fork-sync-selftest.sh`.
+Every change to an existing `feat/*` branch or to `fork/tooling` is a pull request that the owner reviews and merges.
+
+1. Start from GitHub's copy: `git fetch origin && git switch -c dev/<topic> origin/<target>`, where `<target>` is the `feat/*` branch or `fork/tooling`.
+2. Take the target's subject: `subject=$(git log -1 --format=%s origin/<target>)`. Commit your work as `git commit -m "fixup! $subject"`; further commits on the same pull request can have any title.
+3. Changed `scripts/fork-sync.sh` only: run `scripts/fork-sync-selftest.sh`.
    Done when: it prints `selftest: fork-sync.sh passed`.
-5. Push each changed branch with an explicit lease: `git push --force-with-lease=<branch>:<sha that origin had in step 1> origin <branch>`.
-6. Start one build: `gh workflow run fork-release.yml -R drecchia/parlo`. Wait for it with one `gh run watch <id> -R drecchia/parlo --exit-status --interval 60`. A cold build takes about half an hour.
-   Done when: the run is green, and after `git fetch origin`, `git merge-base --is-ancestor origin/<branch> origin/release` succeeds for `main` and every branch in `BRANCHES`.
+4. Push and open the pull request:
+   `git push -u origin dev/<topic>` and `gh pr create -R drecchia/parlo --base <target> --head dev/<topic> --title "fixup! $subject" --body "<what, why, how it was verified>"`.
+   Done when: the pull request exists and its title is exactly `fixup! ` plus the target's subject.
+5. Stop and hand the pull request to the owner. The owner merges with **Squash and merge**, keeping the `fixup!` title, and deletes the `dev/` branch.
+6. After the merge, start one build: `gh workflow run fork-release.yml -R drecchia/parlo`. Wait for it with one `gh run watch <id> -R drecchia/parlo --exit-status --interval 60`. A cold build takes about half an hour. Its rebase stage folds the fixup, so the target is one commit again.
+   Done when: the run is green, `git fetch origin` then `git rev-list --count origin/main..origin/<target>` is `1`, and `git merge-base --is-ancestor origin/<branch> origin/release` succeeds for `main` and every branch in `BRANCHES`.
 7. Update issue #1 when the branch list or the process changed.
+
+A new feature: `git switch -c feat/<name> origin/main`, one commit, `git push -u origin feat/<name>`; then a pull request into `fork/tooling` (steps 1 to 5) that adds `feat/<name>` to `BRANCHES` and to the table and the Risk section of `FORK.md`.
 
 ## When a run fails
 
@@ -49,7 +55,8 @@ The remote decides: every step starts from `git fetch origin`, and `origin/<bran
 | Red step | Do |
 |---|---|
 | Self-test, or anything before it | Reproduce with `scripts/fork-sync-selftest.sh`, fix on `fork/tooling`, publish |
-| Rebase, Merge | Resolve once by hand as `FORK.md` describes; the resolution is shared through `fork/rerere` |
+| Rebase, "N commits over main" | A pull request was squash-merged under another title. Stop and tell the owner: the branch needs the extra commit folded (`git rebase -i main`, mark it `fixup`) and a `--force-with-lease` push, a rewrite of a shared branch that is the owner's call |
+| Rebase (conflict), Merge | Resolve once by hand as `FORK.md` describes; the resolution is shared through `fork/rerere` |
 | Clippy, Tests | Fix on the `feat/*` branch that owns the file, publish |
 | Push | A branch moved during the run: start the build again |
 
