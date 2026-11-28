@@ -32,7 +32,7 @@ Two workflows, so that a failure says which half failed:
    | Step | A failure means |
    |---|---|
    | Self-test of the sync script | the script itself is broken |
-   | Rebase the branches onto main | a branch conflicts with the new upstream |
+   | Rebase the branches onto main | a branch conflicts with the new upstream, or a pull request was squash-merged without its `fixup!` title and the branch is two commits |
    | Merge the branches into release | two branches conflict with each other |
    | Clippy, Tests | a feature's code no longer passes on the new upstream |
    | Push release and the branches | a branch changed during the run: run it again |

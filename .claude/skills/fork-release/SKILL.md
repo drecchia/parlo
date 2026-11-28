@@ -55,7 +55,8 @@ A new feature: `git switch -c feat/<name> origin/main`, one commit, `git push -u
 | Red step | Do |
 |---|---|
 | Self-test, or anything before it | Reproduce with `scripts/fork-sync-selftest.sh`, fix on `fork/tooling`, publish |
-| Rebase, Merge | Resolve once by hand as `FORK.md` describes; the resolution is shared through `fork/rerere` |
+| Rebase, "N commits over main" | A pull request was squash-merged under another title. Stop and tell the owner: the branch needs the extra commit folded (`git rebase -i main`, mark it `fixup`) and a `--force-with-lease` push, a rewrite of a shared branch that is the owner's call |
+| Rebase (conflict), Merge | Resolve once by hand as `FORK.md` describes; the resolution is shared through `fork/rerere` |
 | Clippy, Tests | Fix on the `feat/*` branch that owns the file, publish |
 | Push | A branch moved during the run: start the build again |
 

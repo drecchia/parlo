@@ -12,6 +12,7 @@
 #   5. the stages one by one, as the "Build release" workflow runs them
 #   6. a pull request squash-merged as `fixup! <subject>` folds into its
 #      branch's one commit
+#   7. one squash-merged under another title stops the sync, pushing nothing
 #
 # Usage: scripts/fork-sync-selftest.sh
 set -euo pipefail
@@ -127,6 +128,21 @@ check "6. a branch with a squash-merged fixup syncs and pushes" sync five
 check "6. the fixup folded: the branch is one commit again" test "$(origin rev-list --count "$(git --git-dir=up.git rev-parse main)..$feature")" = 1
 check "6. that one commit keeps the branch's subject" test "$(origin log -1 --format=%s "$feature")" = "$feature"
 check "6. and holds the pull request's change" sh -c "git --git-dir='$root/origin.git' show '$feature:$file' | grep -q 'from a pull request'"
+
+# A pull request squash-merged under its own title, not a fixup.
+(
+  cd pr
+  git fetch -q origin
+  git checkout -q -B "$feature" "origin/$feature"
+  echo "a plain title" >> "$file"
+  git commit -q -a -m "Add something"
+  git push -q origin "$feature"
+)
+before=$(origin rev-parse release)
+clone six
+check "7. a branch of two commits stops the sync" sh -c "! (cd six && bash scripts/fork-sync.sh --push --no-test) > '$root/six.log' 2>&1"
+check "7. and says which title to use" grep -q "squash-merge its pull requests as 'fixup! $feature'" six.log
+check "7. release is not pushed" test "$before" = "$(origin rev-parse release)"
 
 if [ "$failed" = 1 ]; then
   echo "selftest: FAILED; clones and logs are in $root" >&2
