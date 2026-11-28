@@ -1,0 +1,72 @@
+# Fork only (not in crmne/zapfast).
+#
+# Keeps main an exact mirror of crmne/zapfast@main, and nothing else: a
+# failure here is about upstream (it rewrote its history) or about the deploy
+# key, never about the fork's own branches.
+#
+# main is protected by a ruleset that blocks every push; the only bypass is
+# the SYNC_DEPLOY_KEY deploy key. A deploy key, not GITHUB_TOKEN, also
+# because upstream commits often touch .github/workflows/, which GITHUB_TOKEN
+# is not allowed to push.
+#
+# When release does not contain main yet, this starts "Build release"
+# (fork-release.yml), which is a workflow of its own so that its failures
+# show under its own name.
+name: Mirror main
+
+on:
+  schedule:
+    - cron: "17 9 * * *" # 06:17 America/Sao_Paulo
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-mirror
+  cancel-in-progress: false
+
+jobs:
+  main:
+    if: github.repository == 'drecchia/parlo'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write # to start "Build release"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+          ssh-key: ${{ secrets.SYNC_DEPLOY_KEY }}
+
+      - name: Fast-forward main to upstream
+        run: |
+          git remote add upstream https://github.com/crmne/zapfast.git
+          git fetch --no-tags upstream main
+          before=$(git rev-parse HEAD)
+          if ! git merge --ff-only upstream/main; then
+            echo "::error::upstream/main is not a fast-forward of main (upstream rewrote history). Sync by hand, see FORK.md."
+            exit 1
+          fi
+          after=$(git rev-parse HEAD)
+          if [ "$before" = "$after" ]; then
+            echo "main already at upstream ($(git log -1 --format='%h %s'))" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            git push origin HEAD:main
+            echo "main: \`${before:0:7}\` -> \`${after:0:7}\` ($(git rev-list --count "$before..$after") commits)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Start "Build release" when release lacks main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # The step above added an `upstream` remote; without this gh picks it.
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if git merge-base --is-ancestor HEAD origin/release; then
+            echo "release already contains main" >> "$GITHUB_STEP_SUMMARY"
+          else
+            gh workflow run fork-release.yml
+            echo "release does not contain main yet: started **Build release**" >> "$GITHUB_STEP_SUMMARY"
+          fi

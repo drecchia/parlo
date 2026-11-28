@@ -1,0 +1,142 @@
+# Fork only (not in crmne/zapfast).
+#
+# Rebuilds release: rebases fork/tooling and feat/* onto main, merges them,
+# lints, tests, and only then pushes. Started by "Mirror main" when main moved,
+# or by hand (Run workflow) after a push to fork/tooling or a feat/* branch.
+#
+# One step per stage of scripts/fork-sync.sh, so the red step says what
+# failed. Until the push step, nothing on GitHub changes: release keeps its
+# last good version. A failure opens, or comments on, an issue labelled
+# fork-sync that names the stage.
+#
+# This file is read from release, the default branch, but the job checks out
+# fork/tooling and runs the script from there.
+name: Build release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'drecchia/parlo'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      issues: write
+    env:
+      CARGO_TERM_COLOR: always
+    defaults:
+      run:
+        shell: bash # with pipefail, for the `| tee` below
+    steps:
+      # The deploy key pushes: rebased branches can touch .github/workflows/,
+      # which GITHUB_TOKEN is not allowed to push.
+      - uses: actions/checkout@v7
+        with:
+          ref: fork/tooling
+          fetch-depth: 0
+          ssh-key: ${{ secrets.SYNC_DEPLOY_KEY }}
+
+      - name: Build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev libpipewire-0.3-dev clang libclang-dev cmake perl pkg-config
+
+      # rust-toolchain.toml pins the compiler; rustup installs it on first use.
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fork-sync
+
+      # Half a minute on scratch repositories, before anything real.
+      - name: Self-test of the sync script
+        id: selftest
+        run: scripts/fork-sync-selftest.sh 2>&1 | tee "$RUNNER_TEMP/sync.log"
+
+      - name: Rebase the branches onto main
+        id: rebase
+        run: |
+          git config user.name "parlo-sync[bot]"
+          git config user.email "parlo-sync@users.noreply.github.com"
+          scripts/fork-sync.sh --stage rebase 2>&1 | tee "$RUNNER_TEMP/sync.log"
+
+      - name: Merge the branches into release
+        id: merge
+        run: scripts/fork-sync.sh --stage merge 2>&1 | tee "$RUNNER_TEMP/sync.log"
+
+      - name: Clippy
+        id: clippy
+        run: scripts/fork-sync.sh --stage clippy 2>&1 | tee "$RUNNER_TEMP/sync.log"
+
+      - name: Tests
+        id: test
+        run: scripts/fork-sync.sh --stage test 2>&1 | tee "$RUNNER_TEMP/sync.log"
+
+      - name: Push release and the branches
+        id: push
+        run: scripts/fork-sync.sh --stage push 2>&1 | tee "$RUNNER_TEMP/sync.log"
+
+      - name: Report failure in an issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # The script adds an `upstream` remote; without this gh picks it.
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          STAGE: >-
+            ${{ steps.selftest.outcome == 'failure' && 'selftest'
+            || steps.rebase.outcome == 'failure' && 'rebase'
+            || steps.merge.outcome == 'failure' && 'merge'
+            || steps.clippy.outcome == 'failure' && 'clippy'
+            || steps.test.outcome == 'failure' && 'test'
+            || steps.push.outcome == 'failure' && 'push'
+            || 'setup' }}
+        run: |
+          case "$STAGE" in
+            selftest) what="o self-test do script de sync"
+              fix="O \`scripts/fork-sync.sh\` está quebrado. Corrigir em \`fork/tooling\` até \`scripts/fork-sync-selftest.sh\` passar." ;;
+            rebase) what="o rebase das branches sobre a \`main\`"
+              fix="Conflito de uma branch com o upstream novo. A partir de \`fork/tooling\`: \`scripts/fork-sync.sh\`, resolver, \`git rebase --continue\`, \`scripts/fork-sync.sh --push\`. A resolução vai para \`fork/rerere\` e o workflow passa a reaplicá-la." ;;
+            merge) what="o merge das branches na \`release\`"
+              fix="Conflito entre duas branches. A partir de \`fork/tooling\`: \`scripts/fork-sync.sh\`, resolver, \`git commit\`, \`scripts/fork-sync.sh --push\`." ;;
+            clippy) what="o clippy da \`release\`"
+              fix="Corrigir na branch \`feat/*\` dona do arquivo, dar push e rodar **Build release** de novo." ;;
+            test) what="os testes da \`release\`"
+              fix="Corrigir na branch \`feat/*\` dona do teste, dar push e rodar **Build release** de novo." ;;
+            push) what="o push da \`release\` e das branches"
+              fix="Alguma branch recebeu push durante o run. Rodar **Build release** de novo." ;;
+            *) what="a preparação do runner (antes do script)"
+              fix="Ver o log do run. Não é um problema das branches." ;;
+          esac
+          gh label create fork-sync --color B60205 --description "Automatic fork sync failed" --force >/dev/null
+          {
+            echo "O workflow **Build release** falhou em: **$what**. A \`release\` continua na última versão boa."
+            echo
+            echo "- Run: $RUN_URL"
+            echo "- upstream/main: \`$(git rev-parse --short upstream/main 2>/dev/null || echo '?')\`"
+            echo
+            echo "$fix"
+            echo
+            echo "<details><summary>Fim do log da etapa</summary>"
+            echo
+            echo '```'
+            tail -n 60 "$RUNNER_TEMP/sync.log" 2>/dev/null || echo "(sem log)"
+            echo '```'
+            echo "</details>"
+          } > "$RUNNER_TEMP/body.md"
+          open=$(gh issue list --label fork-sync --state open --json number --jq '.[0].number')
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh issue create --title "Build release falhou" --label fork-sync --body-file "$RUNNER_TEMP/body.md"
+          fi
